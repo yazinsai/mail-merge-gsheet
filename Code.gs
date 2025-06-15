@@ -23,11 +23,12 @@ limitations under the License.
  
 /**
  * Change these to match the column names you are using for email
- * recipient addresses, email sent column, and batch column.
+ * recipient addresses, email sent column, batch column, and version column.
 */
 const RECIPIENT_COL  = "Recipient";
 const EMAIL_SENT_COL = "Email Sent";
 const BATCH_COL = "Batch";
+const VERSION_COL = "Version";
  
 /**
  * Creates the menu item "Mail Merge" for user to run scripts on drop-down.
@@ -59,10 +60,10 @@ function showBatchSelectionDialog() {
   htmlTemplate.batches = batches;
 
   const html = htmlTemplate.evaluate()
-    .setWidth(400)
-    .setHeight(300);
+    .setWidth(500)
+    .setHeight(600);
 
-  SpreadsheetApp.getUi().showModalDialog(html, 'Select Batch for Mail Merge');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Select Batch & Send Emails');
 }
 
 /**
@@ -86,20 +87,64 @@ function getUniqueBatchValues(sheet) {
 
 /**
  * Processes the batch selection from the dialog
- * @param {Object} formData containing selectedBatch and subjectLine
+ * @param {Object} formData containing selectedBatch, subjectLine, and optional A/B testing fields
  */
 function processBatchSelection(formData) {
-  const selectedBatch = formData.selectedBatch;
-  const subjectLine = formData.subjectLine;
+  try {
+    // Log the received form data for debugging
+    console.log('Form data received:', formData);
 
-  if (!selectedBatch || !subjectLine) {
-    SpreadsheetApp.getUi().alert('Missing Information',
-      'Please select a batch and enter a subject line.',
+    const selectedBatch = formData.selectedBatch;
+    const enableABTesting = formData.enableABTesting;
+
+    if (!selectedBatch) {
+      SpreadsheetApp.getUi().alert('Missing Information',
+        'Please select a batch.',
+        SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+
+    if (enableABTesting) {
+      // A/B Testing mode
+      const subjectA = formData.subjectA;
+      const subjectB = formData.subjectB;
+
+      if (!subjectA || !subjectB) {
+        SpreadsheetApp.getUi().alert('Missing Information',
+          'Please enter both subject lines for A/B testing.',
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      if (subjectA === subjectB) {
+        SpreadsheetApp.getUi().alert('Invalid Input',
+          'Subject lines A and B must be different for A/B testing.',
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      console.log('Starting A/B test with subjects:', subjectA, subjectB);
+      sendABTestEmails(subjectA, subjectB, SpreadsheetApp.getActiveSheet(), selectedBatch);
+    } else {
+      // Regular single subject mode
+      const subjectLine = formData.subjectLine;
+
+      if (!subjectLine) {
+        SpreadsheetApp.getUi().alert('Missing Information',
+          'Please enter a subject line.',
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      console.log('Starting regular email send with subject:', subjectLine);
+      sendEmails(subjectLine, SpreadsheetApp.getActiveSheet(), selectedBatch);
+    }
+  } catch (error) {
+    console.error('Error in processBatchSelection:', error);
+    SpreadsheetApp.getUi().alert('Error',
+      `An error occurred: ${error.message}\n\nPlease check the console logs for more details.`,
       SpreadsheetApp.getUi().ButtonSet.OK);
-    return;
   }
-
-  sendEmails(subjectLine, SpreadsheetApp.getActiveSheet(), selectedBatch);
 }
 
 /**
@@ -217,21 +262,22 @@ function findDuplicateEmails(data, recipientColIdx) {
  * @param {string} selectedBatch (optional) to filter emails by batch
 */
 function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selectedBatch=null) {
-  // option to skip browser prompt if you want to use this code in other projects
-  if (!subjectLine){
-    subjectLine = Browser.inputBox("Mail Merge", 
-                                      "Type or copy/paste the subject line of the Gmail " +
-                                      "draft message you would like to mail merge with:",
-                                      Browser.Buttons.OK_CANCEL);
-                                      
-    if (subjectLine === "cancel" || subjectLine == ""){ 
-    // If no subject line, finishes up
-    return;
+  try {
+    // option to skip browser prompt if you want to use this code in other projects
+    if (!subjectLine){
+      subjectLine = Browser.inputBox("Mail Merge",
+                                        "Type or copy/paste the subject line of the Gmail " +
+                                        "draft message you would like to mail merge with:",
+                                        Browser.Buttons.OK_CANCEL);
+
+      if (subjectLine === "cancel" || subjectLine == ""){
+      // If no subject line, finishes up
+      return;
+      }
     }
-  }
-  
-  // Gets the draft Gmail message to use as a template
-  const emailTemplate = getGmailTemplateFromDrafts_(subjectLine);
+
+    // Gets the draft Gmail message to use as a template
+    const emailTemplate = getGmailTemplateFromDrafts_(subjectLine);
   
   // Gets the data from the passed sheet
   const dataRange = sheet.getDataRange();
@@ -256,7 +302,7 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
   const out = [];
 
   // Loops through all the rows of data
-  obj.forEach(function(row, rowIdx){
+  obj.forEach(function(row){
     // Only sends emails if email_sent cell is blank and not hidden by a filter
     // Also filter by selected batch if specified
     const batchMatches = !selectedBatch || row[BATCH_COL] === selectedBatch;
@@ -291,95 +337,315 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
   
   // Updates the sheet with new data
   sheet.getRange(2, emailSentColIdx+1, out.length).setValues(out);
-  
+  } catch (error) {
+    console.error('Error in sendEmails:', error);
+    SpreadsheetApp.getUi().alert('Email Send Error',
+      `An error occurred while sending emails: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    throw error; // Re-throw so the calling function can handle it
+  }
+}
+
+/**
+ * Get a Gmail draft message by matching the subject line.
+ * @param {string} subject_line to search for draft message
+ * @return {object} containing the subject, plain and html message body and attachments
+ */
+function getGmailTemplateFromDrafts_(subject_line) {
+  try {
+    // get drafts
+    const drafts = GmailApp.getDrafts();
+    // filter the drafts that match subject line
+    const draft = drafts.filter(subjectFilter_(subject_line))[0];
+    // get the message object
+    const msg = draft.getMessage();
+
+    // Handles inline images and attachments so they can be included in the merge
+    // Based on https://stackoverflow.com/a/65813881/1027723
+    // Gets all attachments and inline image attachments
+    const allInlineImages = draft.getMessage().getAttachments({includeInlineImages: true,includeAttachments:false});
+    const attachments = draft.getMessage().getAttachments({includeInlineImages: false});
+    const htmlBody = msg.getBody();
+
+    // Creates an inline image object with the image name as key
+    // (can't rely on image index as array based on insert order)
+    const img_obj = allInlineImages.reduce((obj, i) => (obj[i.getName()] = i, obj) ,{});
+
+    //Regexp searches for all img string positions with cid
+    const imgexp = RegExp('<img.*?src="cid:(.*?)".*?alt="(.*?)"[^\>]+>', 'g');
+    const matches = [...htmlBody.matchAll(imgexp)];
+
+    //Initiates the allInlineImages object
+    const inlineImagesObj = {};
+    // built an inlineImagesObj from inline image matches
+    matches.forEach(match => inlineImagesObj[match[1]] = img_obj[match[2]]);
+
+    return {message: {subject: subject_line, text: msg.getPlainBody(), html:htmlBody},
+            attachments: attachments, inlineImages: inlineImagesObj };
+  } catch(e) {
+    throw new Error("Oops - can't find Gmail draft");
+  }
+
   /**
-   * Get a Gmail draft message by matching the subject line.
+   * Filter draft objects with the matching subject linemessage by matching the subject line.
    * @param {string} subject_line to search for draft message
-   * @return {object} containing the subject, plain and html message body and attachments
-  */
-  function getGmailTemplateFromDrafts_(subject_line){
-    try {
-      // get drafts
-      const drafts = GmailApp.getDrafts();
-      // filter the drafts that match subject line
-      const draft = drafts.filter(subjectFilter_(subject_line))[0];
-      // get the message object
-      const msg = draft.getMessage();
-
-      // Handles inline images and attachments so they can be included in the merge
-      // Based on https://stackoverflow.com/a/65813881/1027723
-      // Gets all attachments and inline image attachments
-      const allInlineImages = draft.getMessage().getAttachments({includeInlineImages: true,includeAttachments:false});
-      const attachments = draft.getMessage().getAttachments({includeInlineImages: false});
-      const htmlBody = msg.getBody(); 
-
-      // Creates an inline image object with the image name as key 
-      // (can't rely on image index as array based on insert order)
-      const img_obj = allInlineImages.reduce((obj, i) => (obj[i.getName()] = i, obj) ,{});
-
-      //Regexp searches for all img string positions with cid
-      const imgexp = RegExp('<img.*?src="cid:(.*?)".*?alt="(.*?)"[^\>]+>', 'g');
-      const matches = [...htmlBody.matchAll(imgexp)];
-
-      //Initiates the allInlineImages object
-      const inlineImagesObj = {};
-      // built an inlineImagesObj from inline image matches
-      matches.forEach(match => inlineImagesObj[match[1]] = img_obj[match[2]]);
-
-      return {message: {subject: subject_line, text: msg.getPlainBody(), html:htmlBody}, 
-              attachments: attachments, inlineImages: inlineImagesObj };
-    } catch(e) {
-      throw new Error("Oops - can't find Gmail draft");
-    }
-
-    /**
-     * Filter draft objects with the matching subject linemessage by matching the subject line.
-     * @param {string} subject_line to search for draft message
-     * @return {object} GmailDraft object
-    */
-    function subjectFilter_(subject_line){
-      return function(element) {
-        if (element.getMessage().getSubject() === subject_line) {
-          return element;
-        }
+   * @return {object} GmailDraft object
+   */
+  function subjectFilter_(subject_line) {
+    return function(element) {
+      if (element.getMessage().getSubject() === subject_line) {
+        return element;
       }
     }
   }
-  
-  /**
-   * Fill template string with data object
-   * @see https://stackoverflow.com/a/378000/1027723
-   * @param {string} template string containing {{}} markers which are replaced with data
-   * @param {object} data object used to replace {{}} markers
-   * @return {object} message replaced with data
-  */
-  function fillInTemplateFromObject_(template, data) {
-    // We have two templates one for plain text and the html body
-    // Stringifing the object means we can do a global replace
-    let template_string = JSON.stringify(template);
+}
 
-    // Token replacement
-    template_string = template_string.replace(/{{[^{}]+}}/g, key => {
-      return escapeData_(data[key.replace(/[{}]+/g, "")] || "");
-    });
-    return  JSON.parse(template_string);
+/**
+ * Fill template string with data object
+ * @see https://stackoverflow.com/a/378000/1027723
+ * @param {string} template string containing {{}} markers which are replaced with data
+ * @param {object} data object used to replace {{}} markers
+ * @return {object} message replaced with data
+ */
+function fillInTemplateFromObject_(template, data) {
+  // We have two templates one for plain text and the html body
+  // Stringifing the object means we can do a global replace
+  let template_string = JSON.stringify(template);
+
+  // Token replacement
+  template_string = template_string.replace(/{{[^{}]+}}/g, key => {
+    return escapeData_(data[key.replace(/[{}]+/g, "")] || "");
+  });
+  return  JSON.parse(template_string);
+}
+
+/**
+ * Escape cell data to make JSON safe
+ * @see https://stackoverflow.com/a/9204218/1027723
+ * @param {string} str to escape JSON special characters from
+ * @return {string} escaped string
+ */
+function escapeData_(str) {
+  return str
+    .replace(/[\\]/g, '\\\\')
+    .replace(/[\"]/g, '\\\"')
+    .replace(/[\/]/g, '\\/')
+    .replace(/[\b]/g, '\\b')
+    .replace(/[\f]/g, '\\f')
+    .replace(/[\n]/g, '\\n')
+    .replace(/[\r]/g, '\\r')
+    .replace(/[\t]/g, '\\t');
+}
+
+/**
+ * Assigns A/B test versions to emails in a batch using deterministic random assignment
+ * @param {Array} emailData - Array of email objects for the batch
+ * @param {string} batchId - The batch identifier for consistent seeding
+ * @return {Array} Array of email objects with version assignments
+ */
+function assignABVersions(emailData, batchId) {
+  // Create a simple hash function for deterministic randomness
+  function simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
   }
 
-  /**
-   * Escape cell data to make JSON safe
-   * @see https://stackoverflow.com/a/9204218/1027723
-   * @param {string} str to escape JSON special characters from
-   * @return {string} escaped string
-  */
-  function escapeData_(str) {
-    return str
-      .replace(/[\\]/g, '\\\\')
-      .replace(/[\"]/g, '\\\"')
-      .replace(/[\/]/g, '\\/')
-      .replace(/[\b]/g, '\\b')
-      .replace(/[\f]/g, '\\f')
-      .replace(/[\n]/g, '\\n')
-      .replace(/[\r]/g, '\\r')
-      .replace(/[\t]/g, '\\t');
+  // Assign versions based on hash of batch + email
+  return emailData.map((emailRow, index) => {
+    const email = emailRow[RECIPIENT_COL] || '';
+    const seed = `${batchId}_${email}_${index}`;
+    const hash = simpleHash(seed);
+    const version = hash % 2 === 0 ? 'A' : 'B';
+
+    return {
+      ...emailRow,
+      [VERSION_COL]: version
+    };
+  });
+}
+
+/**
+ * Sends A/B test emails from sheet data
+ * @param {string} subjectA - Subject line for version A
+ * @param {string} subjectB - Subject line for version B
+ * @param {Sheet} sheet - Sheet to read data from
+ * @param {string} selectedBatch - Batch to filter emails by
+ */
+function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSheet(), selectedBatch) {
+  try {
+    // Get email templates for both versions
+    const emailTemplateA = getGmailTemplateFromDrafts_(subjectA);
+    const emailTemplateB = getGmailTemplateFromDrafts_(subjectB);
+
+  // Gets the data from the passed sheet
+  const dataRange = sheet.getDataRange();
+  const data = dataRange.getDisplayValues();
+
+  // Assumes row 1 contains our column headings
+  const heads = data.shift();
+
+  // Get column indices
+  const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
+  const versionColIdx = heads.indexOf(VERSION_COL);
+
+  // Check if version column exists, if not, we'll need to add it
+  if (versionColIdx === -1) {
+    SpreadsheetApp.getUi().alert('Version Column Missing',
+      `Please add a "${VERSION_COL}" column to your spreadsheet for A/B testing.`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  // Convert 2d array into an object array
+  const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
+
+  // Filter for the selected batch and unsent emails
+  const batchEmails = obj.filter((row) => {
+    const batchMatches = row[BATCH_COL] === selectedBatch;
+    const notSent = row[EMAIL_SENT_COL] === '';
+    return batchMatches && notSent;
+  });
+
+  if (batchEmails.length === 0) {
+    SpreadsheetApp.getUi().alert('No Emails to Send',
+      `No unsent emails found in batch "${selectedBatch}".`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  // Assign A/B versions
+  const emailsWithVersions = assignABVersions(batchEmails, selectedBatch);
+
+  // Count versions for reporting
+  const versionCounts = { A: 0, B: 0 };
+  emailsWithVersions.forEach(email => {
+    versionCounts[email[VERSION_COL]]++;
+  });
+
+  // Confirm with user
+  const confirmMessage = `Ready to send A/B test emails to batch "${selectedBatch}":\n\n` +
+    `Version A (${versionCounts.A} emails): "${subjectA}"\n` +
+    `Version B (${versionCounts.B} emails): "${subjectB}"\n\n` +
+    `Total: ${emailsWithVersions.length} emails\n\n` +
+    `Do you want to proceed?`;
+
+  const response = SpreadsheetApp.getUi().alert('Confirm A/B Test Send',
+    confirmMessage, SpreadsheetApp.getUi().ButtonSet.YES_NO);
+
+  if (response !== SpreadsheetApp.getUi().Button.YES) {
+    return;
+  }
+
+  // Create arrays to track updates
+  const emailSentUpdates = [];
+  const versionUpdates = [];
+
+  // Send emails and track results
+  obj.forEach(function(row) {
+    const batchMatches = row[BATCH_COL] === selectedBatch;
+    const notSent = row[EMAIL_SENT_COL] === '';
+
+    if (batchMatches && notSent) {
+      // Find the version assignment for this email
+      const emailWithVersion = emailsWithVersions.find(e => e[RECIPIENT_COL] === row[RECIPIENT_COL]);
+      const version = emailWithVersion ? emailWithVersion[VERSION_COL] : 'A';
+
+      // Choose the appropriate template and subject
+      const emailTemplate = version === 'A' ? emailTemplateA : emailTemplateB;
+      const currentSubject = version === 'A' ? subjectA : subjectB;
+
+      try {
+        // Create custom template with the correct subject
+        const customTemplate = {
+          ...emailTemplate,
+          message: {
+            ...emailTemplate.message,
+            subject: currentSubject
+          }
+        };
+
+        const msgObj = fillInTemplateFromObject_(customTemplate.message, row);
+
+        // Send email
+        GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+          htmlBody: msgObj.html,
+          attachments: emailTemplate.attachments,
+          inlineImages: emailTemplate.inlineImages
+        });
+
+        // Record success
+        emailSentUpdates.push([new Date()]);
+        versionUpdates.push([version]);
+      } catch(e) {
+        // Record error
+        emailSentUpdates.push([e.message]);
+        versionUpdates.push([version]);
+      }
+    } else {
+      // Keep existing values for non-matching rows
+      emailSentUpdates.push([row[EMAIL_SENT_COL]]);
+      versionUpdates.push([row[VERSION_COL]]);
+    }
+  });
+
+  // Update the sheet with results
+  sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
+  sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
+
+  // Show completion message
+  SpreadsheetApp.getUi().alert('A/B Test Complete',
+    `Successfully sent ${emailsWithVersions.length} emails:\n` +
+    `Version A: ${versionCounts.A} emails\n` +
+    `Version B: ${versionCounts.B} emails`,
+    SpreadsheetApp.getUi().ButtonSet.OK);
+  } catch (error) {
+    console.error('Error in sendABTestEmails:', error);
+    SpreadsheetApp.getUi().alert('A/B Test Error',
+      `An error occurred during A/B testing: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    throw error; // Re-throw so the calling function can handle it
+  }
+}
+
+/**
+ * Test function to debug form data processing
+ * This can be called directly from the Apps Script editor to test
+ */
+function testProcessBatchSelection() {
+  // Test with regular email data - UPDATE THIS SUBJECT LINE TO MATCH YOUR GMAIL DRAFT
+  const testFormData = {
+    selectedBatch: "test",
+    enableABTesting: false,
+    subjectLine: "quick question {{First name}}"  // Change this to match your actual Gmail draft subject
   };
+
+  console.log('Testing processBatchSelection with:', testFormData);
+  processBatchSelection(testFormData);
+}
+
+/**
+ * Helper function to list all Gmail draft subject lines
+ * Run this to see what drafts you have available
+ */
+function listGmailDrafts() {
+  try {
+    const drafts = GmailApp.getDrafts();
+    console.log(`Found ${drafts.length} Gmail drafts:`);
+
+    drafts.forEach((draft, index) => {
+      const subject = draft.getMessage().getSubject();
+      console.log(`${index + 1}. "${subject}"`);
+    });
+
+    if (drafts.length === 0) {
+      console.log('No Gmail drafts found. Please create some drafts first.');
+    }
+  } catch (error) {
+    console.error('Error listing drafts:', error);
+  }
 }

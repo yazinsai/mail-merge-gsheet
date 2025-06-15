@@ -74,6 +74,104 @@
             color: #666;
             margin-top: 5px;
         }
+
+        .ab-toggle-container {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+            border: 1px solid #e8eaed;
+        }
+
+        .toggle-wrapper {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+            margin-right: 10px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #4285f4;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+
+        .toggle-label {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .ab-fields {
+            display: none;
+        }
+
+        .ab-fields.active {
+            display: block;
+        }
+
+        .ab-section {
+            background-color: #fff;
+            padding: 12px;
+            border-radius: 4px;
+            margin: 10px 0;
+            border: 1px solid #dadce0;
+        }
+
+        .version-label {
+            color: #1a73e8;
+            font-weight: bold;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .warning-text {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -90,36 +188,146 @@
                 <div class="info-text">Choose which batch of recipients to send emails to</div>
             </div>
 
-            <div class="form-group">
+            <div class="ab-toggle-container">
+                <div class="toggle-wrapper">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="abTestToggle" name="enableABTesting">
+                        <span class="slider"></span>
+                    </label>
+                    <label for="abTestToggle" class="toggle-label">Enable A/B Testing</label>
+                </div>
+                <div class="info-text">Toggle this on to test two different subject lines with your batch</div>
+            </div>
+
+            <!-- Regular single subject field (shown when A/B testing is OFF) -->
+            <div id="singleSubjectField" class="form-group">
                 <label for="subjectLine">Gmail Draft Subject Line:</label>
                 <input type="text" id="subjectLine" name="subjectLine" required
                        placeholder="Enter the subject line of your Gmail draft">
                 <div class="info-text">This should match the subject line of your Gmail draft template</div>
             </div>
 
+            <!-- A/B testing fields (shown when A/B testing is ON) -->
+            <div id="abTestFields" class="ab-fields">
+                <div class="warning-text">
+                    <strong>Important:</strong> Make sure you have Gmail drafts created with both subject lines below.
+                    The email content will come from these drafts.
+                </div>
+
+                <div class="ab-section">
+                    <div class="version-label">Version A (50% of recipients)</div>
+                    <div class="form-group">
+                        <label for="subjectA">Gmail Draft Subject Line A:</label>
+                        <input type="text" id="subjectA" name="subjectA"
+                               placeholder="Enter subject line for version A">
+                        <div class="info-text">This should match the subject line of your Gmail draft for version A</div>
+                    </div>
+                </div>
+
+                <div class="ab-section">
+                    <div class="version-label">Version B (50% of recipients)</div>
+                    <div class="form-group">
+                        <label for="subjectB">Gmail Draft Subject Line B:</label>
+                        <input type="text" id="subjectB" name="subjectB"
+                               placeholder="Enter subject line for version B">
+                        <div class="info-text">This should match the subject line of your Gmail draft for version B</div>
+                    </div>
+                </div>
+
+                <div class="info-text" style="text-align: center; margin: 15px 0;">
+                    Recipients will be randomly but consistently assigned to either version A or B.
+                    The assignment will be recorded in the "Version" column.
+                </div>
+            </div>
+
             <div class="button-container">
                 <button type="button" class="cancel-btn" onclick="google.script.host.close()">Cancel</button>
-                <button type="submit">Send Emails</button>
+                <button type="submit" id="submitBtn">Send Emails</button>
             </div>
         </form>
     </div>
 
     <script>
+        // Handle A/B testing toggle
+        document.getElementById('abTestToggle').addEventListener('change', function() {
+            const isABTestEnabled = this.checked;
+            const singleSubjectField = document.getElementById('singleSubjectField');
+            const abTestFields = document.getElementById('abTestFields');
+            const subjectLine = document.getElementById('subjectLine');
+            const subjectA = document.getElementById('subjectA');
+            const subjectB = document.getElementById('subjectB');
+
+            if (isABTestEnabled) {
+                // Show A/B testing fields, hide single subject field
+                singleSubjectField.style.display = 'none';
+                abTestFields.classList.add('active');
+
+                // Remove required attribute from single subject, add to A/B subjects
+                subjectLine.removeAttribute('required');
+                subjectA.setAttribute('required', 'required');
+                subjectB.setAttribute('required', 'required');
+            } else {
+                // Show single subject field, hide A/B testing fields
+                singleSubjectField.style.display = 'block';
+                abTestFields.classList.remove('active');
+
+                // Add required attribute to single subject, remove from A/B subjects
+                subjectLine.setAttribute('required', 'required');
+                subjectA.removeAttribute('required');
+                subjectB.removeAttribute('required');
+            }
+        });
+
+        // Handle form submission
         document.getElementById('batchForm').addEventListener('submit', function(e) {
             e.preventDefault();
 
             const selectedBatch = document.getElementById('batchSelect').value;
-            const subjectLine = document.getElementById('subjectLine').value;
+            const enableABTesting = document.getElementById('abTestToggle').checked;
 
-            if (!selectedBatch || !subjectLine) {
-                alert('Please select a batch and enter a subject line.');
+            if (!selectedBatch) {
+                alert('Please select a batch.');
                 return;
+            }
+
+            let formData = {
+                selectedBatch: selectedBatch,
+                enableABTesting: enableABTesting
+            };
+
+            if (enableABTesting) {
+                // A/B Testing mode
+                const subjectA = document.getElementById('subjectA').value;
+                const subjectB = document.getElementById('subjectB').value;
+
+                if (!subjectA || !subjectB) {
+                    alert('Please enter both subject lines for A/B testing.');
+                    return;
+                }
+
+                if (subjectA === subjectB) {
+                    alert('Subject lines A and B must be different for A/B testing.');
+                    return;
+                }
+
+                formData.subjectA = subjectA;
+                formData.subjectB = subjectB;
+            } else {
+                // Regular mode
+                const subjectLine = document.getElementById('subjectLine').value;
+
+                if (!subjectLine) {
+                    alert('Please enter a subject line.');
+                    return;
+                }
+
+                formData.subjectLine = subjectLine;
             }
 
             // Disable the submit button to prevent double submission
             const submitBtn = document.querySelector('button[type="submit"]');
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Sending...';
+            submitBtn.textContent = enableABTesting ? 'Starting A/B Test...' : 'Sending...';
 
             // Call the server-side function
             google.script.run
@@ -131,10 +339,7 @@
                     submitBtn.disabled = false;
                     submitBtn.textContent = 'Send Emails';
                 })
-                .processBatchSelection({
-                    selectedBatch: selectedBatch,
-                    subjectLine: subjectLine
-                });
+                .processBatchSelection(formData);
         });
     </script>
 </body>
