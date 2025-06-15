@@ -242,10 +242,13 @@
 
             <!-- Rate limiting information -->
             <div class="warning-text">
-                <strong>Rate Limiting:</strong> Gmail limits email sending to 100 emails per hour.
-                For large batches (1000+ emails), the system will automatically pause and resume
-                sending every hour until all emails are sent. You can check progress or cancel
-                the job using the "Mail Merge" menu.
+                <strong>Smart Rate Limiting:</strong> Gmail has both daily quotas and hourly rate limits (100 emails/hour).
+                This system automatically monitors both limits and intelligently schedules resumption:
+                <ul style="margin: 8px 0; padding-left: 20px;">
+                    <li><strong>Hourly limit reached:</strong> Resumes in 1 hour</li>
+                    <li><strong>Daily quota low:</strong> Resumes tomorrow at 12:30 AM</li>
+                </ul>
+                For large batches (1000+ emails), check progress or quotas using the "Mail Merge" menu.
             </div>
 
             <div class="button-container">

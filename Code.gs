@@ -34,6 +34,7 @@ const VERSION_COL = "Version";
 const EMAIL_RATE_LIMIT = 95; // Send 95 emails per hour (leaving buffer for safety)
 const RESUME_DELAY_HOURS = 1; // Wait 1 hour before resuming
 const MAX_RESUME_ATTEMPTS = 48; // Maximum 48 hours of retries
+const MIN_DAILY_QUOTA_BUFFER = 10; // Minimum daily quota to keep as buffer
  
 /**
  * Creates the menu item "Mail Merge" for user to run scripts on drop-down.
@@ -45,6 +46,7 @@ function onOpen() {
       .addSeparator()
       .addItem('Check Job Status', 'showJobStatus')
       .addItem('Cancel Active Job', 'cancelActiveJob')
+      .addItem('Check Email Quotas', 'testEmailQuotas')
       .addSeparator()
       .addItem('Remove Duplicate Email Addresses', 'removeDuplicateEmails')
       .addToUi();
@@ -348,17 +350,44 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
       const batchMatches = !selectedBatch || row[BATCH_COL] === selectedBatch;
 
       if (row[EMAIL_SENT_COL] == '' && batchMatches) {
-        // Check rate limit
-        if (emailsSentThisSession >= EMAIL_RATE_LIMIT) {
-          console.log(`Rate limit reached (${EMAIL_RATE_LIMIT} emails). Scheduling resume.`);
+        // Check both daily and hourly quotas
+        const quotaCheck = checkEmailQuotas(emailsSentThisSession);
+
+        if (!quotaCheck.canSend) {
+          console.log(`Quota limit reached. Reason: ${quotaCheck.reason}`);
 
           // Update job state for resume
           jobState.emailsSent += emailsSentThisSession;
-          jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
 
-          // Create resume trigger
-          const triggerId = createResumeTrigger();
-          jobState.triggerId = triggerId;
+          let alertTitle, alertMessage, shouldScheduleResume = true;
+
+          if (quotaCheck.reason === 'daily_quota_exhausted') {
+            // Daily quota exhausted - schedule resume for tomorrow
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrow.setHours(0, 30, 0, 0); // Resume at 12:30 AM tomorrow
+
+            jobState.nextResumeTime = tomorrow.toISOString();
+            alertTitle = 'Daily Email Quota Exhausted';
+            alertMessage = `Sent ${emailsSentThisSession} emails this session.\n` +
+              `Daily quota remaining: ${quotaCheck.dailyQuotaRemaining}\n` +
+              `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n\n` +
+              `The job will automatically resume tomorrow at 12:30 AM.`;
+          } else {
+            // Hourly rate limit - schedule resume in 1 hour
+            jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+            alertTitle = 'Hourly Rate Limit Reached';
+            alertMessage = `Sent ${emailsSentThisSession} emails this session.\n` +
+              `Daily quota remaining: ${quotaCheck.dailyQuotaRemaining}\n` +
+              `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n\n` +
+              `The job will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`;
+          }
+
+          if (shouldScheduleResume) {
+            // Create resume trigger
+            const triggerId = createResumeTrigger();
+            jobState.triggerId = triggerId;
+          }
 
           saveJobState(jobState);
 
@@ -369,11 +398,8 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
 
           // Show progress message
           const remaining = jobState.totalEmails - jobState.emailsSent - emailsSentThisSession;
-          SpreadsheetApp.getUi().alert('Rate Limit Reached',
-            `Sent ${emailsSentThisSession} emails this session.\n` +
-            `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n` +
-            `Remaining: ${remaining} emails.\n\n` +
-            `The job will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`,
+          SpreadsheetApp.getUi().alert(alertTitle,
+            alertMessage + `\nRemaining: ${remaining} emails.`,
             SpreadsheetApp.getUi().ButtonSet.OK);
 
           return;
@@ -668,17 +694,44 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
       const notSent = row[EMAIL_SENT_COL] === '';
 
       if (batchMatches && notSent) {
-        // Check rate limit
-        if (emailsSentThisSession >= EMAIL_RATE_LIMIT) {
-          console.log(`Rate limit reached (${EMAIL_RATE_LIMIT} emails). Scheduling resume.`);
+        // Check both daily and hourly quotas
+        const quotaCheck = checkEmailQuotas(emailsSentThisSession);
+
+        if (!quotaCheck.canSend) {
+          console.log(`Quota limit reached. Reason: ${quotaCheck.reason}`);
 
           // Update job state for resume
           jobState.emailsSent += emailsSentThisSession;
-          jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
 
-          // Create resume trigger
-          const triggerId = createResumeTrigger();
-          jobState.triggerId = triggerId;
+          let alertTitle, alertMessage, shouldScheduleResume = true;
+
+          if (quotaCheck.reason === 'daily_quota_exhausted') {
+            // Daily quota exhausted - schedule resume for tomorrow
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrow.setHours(0, 30, 0, 0); // Resume at 12:30 AM tomorrow
+
+            jobState.nextResumeTime = tomorrow.toISOString();
+            alertTitle = 'Daily Email Quota Exhausted';
+            alertMessage = `Sent ${emailsSentThisSession} emails this session.\n` +
+              `Daily quota remaining: ${quotaCheck.dailyQuotaRemaining}\n` +
+              `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n\n` +
+              `The A/B test will automatically resume tomorrow at 12:30 AM.`;
+          } else {
+            // Hourly rate limit - schedule resume in 1 hour
+            jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+            alertTitle = 'Hourly Rate Limit Reached';
+            alertMessage = `Sent ${emailsSentThisSession} emails this session.\n` +
+              `Daily quota remaining: ${quotaCheck.dailyQuotaRemaining}\n` +
+              `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n\n` +
+              `The A/B test will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`;
+          }
+
+          if (shouldScheduleResume) {
+            // Create resume trigger
+            const triggerId = createResumeTrigger();
+            jobState.triggerId = triggerId;
+          }
 
           saveJobState(jobState);
 
@@ -690,11 +743,8 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
 
           // Show progress message
           const remaining = jobState.totalEmails - jobState.emailsSent - emailsSentThisSession;
-          SpreadsheetApp.getUi().alert('Rate Limit Reached',
-            `Sent ${emailsSentThisSession} emails this session.\n` +
-            `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n` +
-            `Remaining: ${remaining} emails.\n\n` +
-            `The A/B test will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`,
+          SpreadsheetApp.getUi().alert(alertTitle,
+            alertMessage + `\nRemaining: ${remaining} emails.`,
             SpreadsheetApp.getUi().ButtonSet.OK);
 
           return;
@@ -829,6 +879,38 @@ function clearTestJobState() {
 }
 
 /**
+ * Test function to check current email quotas
+ * This helps understand your current Gmail sending limits
+ */
+function testEmailQuotas() {
+  try {
+    const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();
+    const quotaCheck = checkEmailQuotas(0); // Check with 0 emails sent this session
+
+    console.log('=== Email Quota Status ===');
+    console.log(`Daily quota remaining: ${dailyQuotaRemaining}`);
+    console.log(`Can send emails: ${quotaCheck.canSend}`);
+    console.log(`Max emails this session: ${quotaCheck.maxEmails}`);
+    console.log(`Quota check reason: ${quotaCheck.reason}`);
+
+    // Show in UI as well
+    const message = `Email Quota Status:\n\n` +
+      `Daily Quota Remaining: ${dailyQuotaRemaining}\n` +
+      `Can Send Emails: ${quotaCheck.canSend ? 'Yes' : 'No'}\n` +
+      `Max Emails This Session: ${quotaCheck.maxEmails}\n` +
+      `Status: ${quotaCheck.reason}`;
+
+    SpreadsheetApp.getUi().alert('Email Quota Check', message, SpreadsheetApp.getUi().ButtonSet.OK);
+
+  } catch (error) {
+    console.error('Error checking email quotas:', error);
+    SpreadsheetApp.getUi().alert('Quota Check Error',
+      `Unable to check email quotas: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
  * Helper function to list all Gmail draft subject lines
  * Run this to see what drafts you have available
  */
@@ -935,12 +1017,23 @@ function showJobStatus() {
   const percentage = Math.round((jobState.emailsSent / jobState.totalEmails) * 100);
   const nextResumeTime = jobState.nextResumeTime ? new Date(jobState.nextResumeTime).toLocaleString() : 'Unknown';
 
+  // Get current daily quota
+  let dailyQuotaInfo = '';
+  try {
+    const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();
+    dailyQuotaInfo = `\nDaily Quota Remaining: ${dailyQuotaRemaining}`;
+  } catch (error) {
+    dailyQuotaInfo = '\nDaily Quota: Unable to check';
+  }
+
   const message = `Active Email Job Status:\n\n` +
     `Batch: ${jobState.batchId}\n` +
+    `Type: ${jobState.isABTest ? 'A/B Test' : 'Regular Email'}\n` +
     `Progress: ${progress} emails (${percentage}%)\n` +
     `Started: ${new Date(jobState.startTime).toLocaleString()}\n` +
     `Next Resume: ${nextResumeTime}\n` +
-    `Resume Attempts: ${jobState.resumeCount}/${MAX_RESUME_ATTEMPTS}`;
+    `Resume Attempts: ${jobState.resumeCount}/${MAX_RESUME_ATTEMPTS}` +
+    dailyQuotaInfo;
 
   ui.alert('Job Status', message, ui.ButtonSet.OK);
 }
@@ -1039,6 +1132,64 @@ function countPendingEmails(sheet, batchId) {
   }
 
   return pendingCount;
+}
+
+/**
+ * Checks both daily and hourly email quotas to determine how many emails can be sent
+ * @param {number} emailsSentThisSession - Number of emails already sent in current session
+ * @return {Object} Object with canSend (boolean), reason (string), and maxEmails (number)
+ */
+function checkEmailQuotas(emailsSentThisSession) {
+  try {
+    // Get remaining daily quota from Gmail
+    const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();
+
+    console.log(`Daily quota remaining: ${dailyQuotaRemaining}`);
+    console.log(`Emails sent this session: ${emailsSentThisSession}`);
+
+    // Check if we have enough daily quota (keeping a buffer)
+    if (dailyQuotaRemaining <= MIN_DAILY_QUOTA_BUFFER) {
+      return {
+        canSend: false,
+        reason: 'daily_quota_exhausted',
+        maxEmails: 0,
+        dailyQuotaRemaining: dailyQuotaRemaining
+      };
+    }
+
+    // Check hourly rate limit
+    if (emailsSentThisSession >= EMAIL_RATE_LIMIT) {
+      return {
+        canSend: false,
+        reason: 'hourly_rate_limit',
+        maxEmails: 0,
+        dailyQuotaRemaining: dailyQuotaRemaining
+      };
+    }
+
+    // Calculate how many more emails we can send this session
+    const remainingHourlyQuota = EMAIL_RATE_LIMIT - emailsSentThisSession;
+    const remainingDailyQuota = dailyQuotaRemaining - MIN_DAILY_QUOTA_BUFFER;
+    const maxEmails = Math.min(remainingHourlyQuota, remainingDailyQuota);
+
+    return {
+      canSend: maxEmails > 0,
+      reason: maxEmails > 0 ? 'can_send' : 'quota_exhausted',
+      maxEmails: maxEmails,
+      dailyQuotaRemaining: dailyQuotaRemaining
+    };
+
+  } catch (error) {
+    console.error('Error checking email quotas:', error);
+    // Fallback to hourly limit only if daily quota check fails
+    const canSend = emailsSentThisSession < EMAIL_RATE_LIMIT;
+    return {
+      canSend: canSend,
+      reason: canSend ? 'can_send_fallback' : 'hourly_rate_limit',
+      maxEmails: canSend ? EMAIL_RATE_LIMIT - emailsSentThisSession : 0,
+      dailyQuotaRemaining: 'unknown'
+    };
+  }
 }
 
 /**
