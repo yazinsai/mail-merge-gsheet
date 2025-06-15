@@ -29,6 +29,11 @@ const RECIPIENT_COL  = "Recipient";
 const EMAIL_SENT_COL = "Email Sent";
 const BATCH_COL = "Batch";
 const VERSION_COL = "Version";
+
+// Rate limiting constants
+const EMAIL_RATE_LIMIT = 95; // Send 95 emails per hour (leaving buffer for safety)
+const RESUME_DELAY_HOURS = 1; // Wait 1 hour before resuming
+const MAX_RESUME_ATTEMPTS = 48; // Maximum 48 hours of retries
  
 /**
  * Creates the menu item "Mail Merge" for user to run scripts on drop-down.
@@ -37,6 +42,9 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Mail Merge')
       .addItem('Select Batch & Send Emails', 'showBatchSelectionDialog')
+      .addSeparator()
+      .addItem('Check Job Status', 'showJobStatus')
+      .addItem('Cancel Active Job', 'cancelActiveJob')
       .addSeparator()
       .addItem('Remove Duplicate Email Addresses', 'removeDuplicateEmails')
       .addToUi();
@@ -256,13 +264,24 @@ function findDuplicateEmails(data, recipientColIdx) {
 }
 
 /**
- * Sends emails from sheet data.
+ * Sends emails from sheet data with rate limiting and automatic resumption.
  * @param {string} subjectLine (optional) for the email draft message
  * @param {Sheet} sheet to read data from
  * @param {string} selectedBatch (optional) to filter emails by batch
+ * @param {Object} resumeState (optional) state for resuming interrupted jobs
 */
-function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selectedBatch=null) {
+function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selectedBatch=null, resumeState=null) {
   try {
+    // Check if there's already an active job
+    const existingJob = getActiveJobState();
+    if (existingJob && !resumeState) {
+      SpreadsheetApp.getUi().alert('Job Already Active',
+        `There is already an active email job for batch "${existingJob.batchId}". ` +
+        `Please wait for it to complete or cancel it first.`,
+        SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+
     // option to skip browser prompt if you want to use this code in other projects
     if (!subjectLine){
       subjectLine = Browser.inputBox("Mail Merge",
@@ -279,64 +298,131 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
     // Gets the draft Gmail message to use as a template
     const emailTemplate = getGmailTemplateFromDrafts_(subjectLine);
   
-  // Gets the data from the passed sheet
-  const dataRange = sheet.getDataRange();
-  // Fetches displayed values for each row in the Range HT Andrew Roberts 
-  // https://mashe.hawksey.info/2020/04/a-bulk-email-mail-merge-with-gmail-and-google-sheets-solution-evolution-using-v8/#comment-187490
-  // @see https://developers.google.com/apps-script/reference/spreadsheet/range#getdisplayvalues
-  const data = dataRange.getDisplayValues();
-
-  // Assumes row 1 contains our column headings
-  const heads = data.shift(); 
-  
-  // Gets the index of the column named 'Email Status' (Assumes header names are unique)
-  // @see http://ramblings.mcpher.com/Home/excelquirks/gooscript/arrayfunctions
-  const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
-  
-  // Converts 2d array into an object array
-  // See https://stackoverflow.com/a/22917499/1027723
-  // For a pretty version, see https://mashe.hawksey.info/?p=17869/#comment-184945
-  const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
-
-  // Creates an array to record sent emails
-  const out = [];
-
-  // Loops through all the rows of data
-  obj.forEach(function(row){
-    // Only sends emails if email_sent cell is blank and not hidden by a filter
-    // Also filter by selected batch if specified
-    const batchMatches = !selectedBatch || row[BATCH_COL] === selectedBatch;
-    if (row[EMAIL_SENT_COL] == '' && batchMatches){
-      try {
-        const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
-
-        // See https://developers.google.com/apps-script/reference/gmail/gmail-app#sendEmail(String,String,String,Object)
-        // If you need to send emails with unicode/emoji characters change GmailApp for MailApp
-        // Uncomment advanced parameters as needed (see docs for limitations)
-        GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
-          htmlBody: msgObj.html,
-          // bcc: 'a.bcc@email.com',
-          // cc: 'a.cc@email.com',
-          // from: 'an.alias@email.com',
-          // name: 'name of the sender',
-          // replyTo: 'a.reply@email.com',
-          // noReply: true, // if the email should be sent from a generic no-reply email address (not available to gmail.com users)
-          attachments: emailTemplate.attachments,
-          inlineImages: emailTemplate.inlineImages
-        });
-        // Edits cell to record email sent date
-        out.push([new Date()]);
-      } catch(e) {
-        // modify cell to record error
-        out.push([e.message]);
-      }
+    // Initialize or resume job state
+    let jobState;
+    if (resumeState) {
+      jobState = resumeState;
+      jobState.resumeCount++;
     } else {
-      out.push([row[EMAIL_SENT_COL]]);
+      // Count total emails to send
+      const totalEmails = countPendingEmails(sheet, selectedBatch);
+
+      if (totalEmails === 0) {
+        SpreadsheetApp.getUi().alert('No Emails to Send',
+          `No unsent emails found in batch "${selectedBatch}".`,
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      // Create new job state
+      jobState = {
+        batchId: selectedBatch,
+        subjectLine: subjectLine,
+        totalEmails: totalEmails,
+        emailsSent: 0,
+        startTime: new Date().toISOString(),
+        resumeCount: 0,
+        isABTest: false
+      };
     }
-  });
-  
-  // Updates the sheet with new data
-  sheet.getRange(2, emailSentColIdx+1, out.length).setValues(out);
+
+    // Save job state
+    saveJobState(jobState);
+
+    // Gets the data from the passed sheet
+    const dataRange = sheet.getDataRange();
+    const data = dataRange.getDisplayValues();
+    const heads = data.shift();
+    const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
+
+    // Convert to object array for easier processing
+    const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
+
+    // Track emails sent in this session
+    let emailsSentThisSession = 0;
+    const out = [];
+
+    // Process emails with rate limiting
+    for (let i = 0; i < obj.length; i++) {
+      const row = obj[i];
+      const batchMatches = !selectedBatch || row[BATCH_COL] === selectedBatch;
+
+      if (row[EMAIL_SENT_COL] == '' && batchMatches) {
+        // Check rate limit
+        if (emailsSentThisSession >= EMAIL_RATE_LIMIT) {
+          console.log(`Rate limit reached (${EMAIL_RATE_LIMIT} emails). Scheduling resume.`);
+
+          // Update job state for resume
+          jobState.emailsSent += emailsSentThisSession;
+          jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+
+          // Create resume trigger
+          const triggerId = createResumeTrigger();
+          jobState.triggerId = triggerId;
+
+          saveJobState(jobState);
+
+          // Update spreadsheet with current progress
+          if (out.length > 0) {
+            sheet.getRange(2, emailSentColIdx + 1, out.length).setValues(out);
+          }
+
+          // Show progress message
+          const remaining = jobState.totalEmails - jobState.emailsSent - emailsSentThisSession;
+          SpreadsheetApp.getUi().alert('Rate Limit Reached',
+            `Sent ${emailsSentThisSession} emails this session.\n` +
+            `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n` +
+            `Remaining: ${remaining} emails.\n\n` +
+            `The job will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`,
+            SpreadsheetApp.getUi().ButtonSet.OK);
+
+          return;
+        }
+
+        try {
+          const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
+
+          GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+            htmlBody: msgObj.html,
+            attachments: emailTemplate.attachments,
+            inlineImages: emailTemplate.inlineImages
+          });
+
+          out.push([new Date()]);
+          emailsSentThisSession++;
+
+        } catch(e) {
+          console.error('Error sending email:', e.message);
+          out.push([e.message]);
+
+          // Stop the batch on error as requested
+          clearJobState();
+
+          // Update spreadsheet with current progress
+          if (out.length > 0) {
+            sheet.getRange(2, emailSentColIdx + 1, out.length).setValues(out);
+          }
+
+          SpreadsheetApp.getUi().alert('Email Send Error',
+            `An error occurred while sending emails: ${e.message}\n\n` +
+            `The batch has been stopped. ${emailsSentThisSession} emails were sent successfully.`,
+            SpreadsheetApp.getUi().ButtonSet.OK);
+          return;
+        }
+      } else {
+        out.push([row[EMAIL_SENT_COL]]);
+      }
+    }
+
+    // Update the sheet with results
+    sheet.getRange(2, emailSentColIdx + 1, out.length).setValues(out);
+
+    // Job completed successfully
+    clearJobState();
+
+    SpreadsheetApp.getUi().alert('Emails Sent Successfully',
+      `All ${emailsSentThisSession} emails have been sent successfully for batch "${selectedBatch}".`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
   } catch (error) {
     console.error('Error in sendEmails:', error);
     SpreadsheetApp.getUi().alert('Email Send Error',
@@ -470,139 +556,227 @@ function assignABVersions(emailData, batchId) {
 }
 
 /**
- * Sends A/B test emails from sheet data
+ * Sends A/B test emails from sheet data with rate limiting and automatic resumption
  * @param {string} subjectA - Subject line for version A
  * @param {string} subjectB - Subject line for version B
  * @param {Sheet} sheet - Sheet to read data from
  * @param {string} selectedBatch - Batch to filter emails by
+ * @param {Object} resumeState - Optional resume state for interrupted jobs
  */
-function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSheet(), selectedBatch) {
+function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSheet(), selectedBatch, resumeState = null) {
   try {
+    // Check if there's already an active job
+    const existingJob = getActiveJobState();
+    if (existingJob && !resumeState) {
+      SpreadsheetApp.getUi().alert('Job Already Active',
+        `There is already an active email job for batch "${existingJob.batchId}". ` +
+        `Please wait for it to complete or cancel it first.`,
+        SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+
     // Get email templates for both versions
     const emailTemplateA = getGmailTemplateFromDrafts_(subjectA);
     const emailTemplateB = getGmailTemplateFromDrafts_(subjectB);
 
-  // Gets the data from the passed sheet
-  const dataRange = sheet.getDataRange();
-  const data = dataRange.getDisplayValues();
-
-  // Assumes row 1 contains our column headings
-  const heads = data.shift();
-
-  // Get column indices
-  const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
-  const versionColIdx = heads.indexOf(VERSION_COL);
-
-  // Check if version column exists, if not, we'll need to add it
-  if (versionColIdx === -1) {
-    SpreadsheetApp.getUi().alert('Version Column Missing',
-      `Please add a "${VERSION_COL}" column to your spreadsheet for A/B testing.`,
-      SpreadsheetApp.getUi().ButtonSet.OK);
-    return;
-  }
-
-  // Convert 2d array into an object array
-  const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
-
-  // Filter for the selected batch and unsent emails
-  const batchEmails = obj.filter((row) => {
-    const batchMatches = row[BATCH_COL] === selectedBatch;
-    const notSent = row[EMAIL_SENT_COL] === '';
-    return batchMatches && notSent;
-  });
-
-  if (batchEmails.length === 0) {
-    SpreadsheetApp.getUi().alert('No Emails to Send',
-      `No unsent emails found in batch "${selectedBatch}".`,
-      SpreadsheetApp.getUi().ButtonSet.OK);
-    return;
-  }
-
-  // Assign A/B versions
-  const emailsWithVersions = assignABVersions(batchEmails, selectedBatch);
-
-  // Count versions for reporting
-  const versionCounts = { A: 0, B: 0 };
-  emailsWithVersions.forEach(email => {
-    versionCounts[email[VERSION_COL]]++;
-  });
-
-  // Confirm with user
-  const confirmMessage = `Ready to send A/B test emails to batch "${selectedBatch}":\n\n` +
-    `Version A (${versionCounts.A} emails): "${subjectA}"\n` +
-    `Version B (${versionCounts.B} emails): "${subjectB}"\n\n` +
-    `Total: ${emailsWithVersions.length} emails\n\n` +
-    `Do you want to proceed?`;
-
-  const response = SpreadsheetApp.getUi().alert('Confirm A/B Test Send',
-    confirmMessage, SpreadsheetApp.getUi().ButtonSet.YES_NO);
-
-  if (response !== SpreadsheetApp.getUi().Button.YES) {
-    return;
-  }
-
-  // Create arrays to track updates
-  const emailSentUpdates = [];
-  const versionUpdates = [];
-
-  // Send emails and track results
-  obj.forEach(function(row) {
-    const batchMatches = row[BATCH_COL] === selectedBatch;
-    const notSent = row[EMAIL_SENT_COL] === '';
-
-    if (batchMatches && notSent) {
-      // Find the version assignment for this email
-      const emailWithVersion = emailsWithVersions.find(e => e[RECIPIENT_COL] === row[RECIPIENT_COL]);
-      const version = emailWithVersion ? emailWithVersion[VERSION_COL] : 'A';
-
-      // Choose the appropriate template and subject
-      const emailTemplate = version === 'A' ? emailTemplateA : emailTemplateB;
-      const currentSubject = version === 'A' ? subjectA : subjectB;
-
-      try {
-        // Create custom template with the correct subject
-        const customTemplate = {
-          ...emailTemplate,
-          message: {
-            ...emailTemplate.message,
-            subject: currentSubject
-          }
-        };
-
-        const msgObj = fillInTemplateFromObject_(customTemplate.message, row);
-
-        // Send email
-        GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
-          htmlBody: msgObj.html,
-          attachments: emailTemplate.attachments,
-          inlineImages: emailTemplate.inlineImages
-        });
-
-        // Record success
-        emailSentUpdates.push([new Date()]);
-        versionUpdates.push([version]);
-      } catch(e) {
-        // Record error
-        emailSentUpdates.push([e.message]);
-        versionUpdates.push([version]);
-      }
+    // Initialize or resume job state
+    let jobState;
+    if (resumeState) {
+      jobState = resumeState;
+      jobState.resumeCount++;
     } else {
-      // Keep existing values for non-matching rows
-      emailSentUpdates.push([row[EMAIL_SENT_COL]]);
-      versionUpdates.push([row[VERSION_COL]]);
+      // Count total emails to send
+      const totalEmails = countPendingEmails(sheet, selectedBatch);
+
+      if (totalEmails === 0) {
+        SpreadsheetApp.getUi().alert('No Emails to Send',
+          `No unsent emails found in batch "${selectedBatch}".`,
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      // Confirm with user for new jobs
+      const confirmMessage = `Ready to send A/B test emails to batch "${selectedBatch}":\n\n` +
+        `Subject A: "${subjectA}"\n` +
+        `Subject B: "${subjectB}"\n\n` +
+        `Total: ${totalEmails} emails\n\n` +
+        `Do you want to proceed?`;
+
+      const response = SpreadsheetApp.getUi().alert('Confirm A/B Test Send',
+        confirmMessage, SpreadsheetApp.getUi().ButtonSet.YES_NO);
+
+      if (response !== SpreadsheetApp.getUi().Button.YES) {
+        return;
+      }
+
+      // Create new job state
+      jobState = {
+        batchId: selectedBatch,
+        subjectA: subjectA,
+        subjectB: subjectB,
+        totalEmails: totalEmails,
+        emailsSent: 0,
+        startTime: new Date().toISOString(),
+        resumeCount: 0,
+        isABTest: true
+      };
     }
-  });
 
-  // Update the sheet with results
-  sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
-  sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
+    // Save job state
+    saveJobState(jobState);
 
-  // Show completion message
-  SpreadsheetApp.getUi().alert('A/B Test Complete',
-    `Successfully sent ${emailsWithVersions.length} emails:\n` +
-    `Version A: ${versionCounts.A} emails\n` +
-    `Version B: ${versionCounts.B} emails`,
-    SpreadsheetApp.getUi().ButtonSet.OK);
+    // Gets the data from the passed sheet
+    const dataRange = sheet.getDataRange();
+    const data = dataRange.getDisplayValues();
+    const heads = data.shift();
+
+    // Get column indices
+    const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
+    const versionColIdx = heads.indexOf(VERSION_COL);
+
+    // Check if version column exists
+    if (versionColIdx === -1) {
+      clearJobState();
+      SpreadsheetApp.getUi().alert('Version Column Missing',
+        `Please add a "${VERSION_COL}" column to your spreadsheet for A/B testing.`,
+        SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+
+    // Convert to object array
+    const obj = data.map(r => (heads.reduce((o, k, i) => (o[k] = r[i] || '', o), {})));
+
+    // Filter for the selected batch and unsent emails
+    const batchEmails = obj.filter((row) => {
+      const batchMatches = row[BATCH_COL] === selectedBatch;
+      const notSent = row[EMAIL_SENT_COL] === '';
+      return batchMatches && notSent;
+    });
+
+    // Assign A/B versions if not already assigned
+    const emailsWithVersions = assignABVersions(batchEmails, selectedBatch);
+
+    // Track emails sent in this session
+    let emailsSentThisSession = 0;
+    const emailSentUpdates = [];
+    const versionUpdates = [];
+
+    // Process emails with rate limiting
+    for (let i = 0; i < obj.length; i++) {
+      const row = obj[i];
+      const batchMatches = row[BATCH_COL] === selectedBatch;
+      const notSent = row[EMAIL_SENT_COL] === '';
+
+      if (batchMatches && notSent) {
+        // Check rate limit
+        if (emailsSentThisSession >= EMAIL_RATE_LIMIT) {
+          console.log(`Rate limit reached (${EMAIL_RATE_LIMIT} emails). Scheduling resume.`);
+
+          // Update job state for resume
+          jobState.emailsSent += emailsSentThisSession;
+          jobState.nextResumeTime = new Date(Date.now() + RESUME_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+
+          // Create resume trigger
+          const triggerId = createResumeTrigger();
+          jobState.triggerId = triggerId;
+
+          saveJobState(jobState);
+
+          // Update spreadsheet with current progress
+          if (emailSentUpdates.length > 0) {
+            sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
+            sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
+          }
+
+          // Show progress message
+          const remaining = jobState.totalEmails - jobState.emailsSent - emailsSentThisSession;
+          SpreadsheetApp.getUi().alert('Rate Limit Reached',
+            `Sent ${emailsSentThisSession} emails this session.\n` +
+            `Total progress: ${jobState.emailsSent + emailsSentThisSession} of ${jobState.totalEmails} emails.\n` +
+            `Remaining: ${remaining} emails.\n\n` +
+            `The A/B test will automatically resume in ${RESUME_DELAY_HOURS} hour(s).`,
+            SpreadsheetApp.getUi().ButtonSet.OK);
+
+          return;
+        }
+
+        // Find the version assignment for this email
+        const emailWithVersion = emailsWithVersions.find(e => e[RECIPIENT_COL] === row[RECIPIENT_COL]);
+        const version = emailWithVersion ? emailWithVersion[VERSION_COL] : 'A';
+
+        // Choose the appropriate template and subject
+        const emailTemplate = version === 'A' ? emailTemplateA : emailTemplateB;
+        const currentSubject = version === 'A' ? subjectA : subjectB;
+
+        try {
+          // Create custom template with the correct subject
+          const customTemplate = {
+            ...emailTemplate,
+            message: {
+              ...emailTemplate.message,
+              subject: currentSubject
+            }
+          };
+
+          const msgObj = fillInTemplateFromObject_(customTemplate.message, row);
+
+          // Send email
+          GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+            htmlBody: msgObj.html,
+            attachments: emailTemplate.attachments,
+            inlineImages: emailTemplate.inlineImages
+          });
+
+          // Record success
+          emailSentUpdates.push([new Date()]);
+          versionUpdates.push([version]);
+          emailsSentThisSession++;
+
+        } catch(e) {
+          console.error('Error sending A/B test email:', e.message);
+          emailSentUpdates.push([e.message]);
+          versionUpdates.push([version]);
+
+          // Stop the batch on error as requested
+          clearJobState();
+
+          // Update spreadsheet with current progress
+          if (emailSentUpdates.length > 0) {
+            sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
+            sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
+          }
+
+          SpreadsheetApp.getUi().alert('A/B Test Error',
+            `An error occurred during A/B testing: ${e.message}\n\n` +
+            `The batch has been stopped. ${emailsSentThisSession} emails were sent successfully.`,
+            SpreadsheetApp.getUi().ButtonSet.OK);
+          return;
+        }
+      } else {
+        // Keep existing values for non-matching rows
+        emailSentUpdates.push([row[EMAIL_SENT_COL]]);
+        versionUpdates.push([row[VERSION_COL]]);
+      }
+    }
+
+    // Update the sheet with results
+    sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
+    sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
+
+    // Job completed successfully
+    clearJobState();
+
+    // Count final versions for reporting
+    const versionCounts = { A: 0, B: 0 };
+    emailsWithVersions.forEach(email => {
+      versionCounts[email[VERSION_COL]]++;
+    });
+
+    SpreadsheetApp.getUi().alert('A/B Test Complete',
+      `Successfully sent ${emailsSentThisSession} emails for batch "${selectedBatch}":\n` +
+      `Version A: ${versionCounts.A} emails\n` +
+      `Version B: ${versionCounts.B} emails`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
   } catch (error) {
     console.error('Error in sendABTestEmails:', error);
     SpreadsheetApp.getUi().alert('A/B Test Error',
@@ -629,6 +803,32 @@ function testProcessBatchSelection() {
 }
 
 /**
+ * Test function for rate limiting - creates a small test batch
+ * This can be used to test the rate limiting functionality without sending many emails
+ */
+function testRateLimiting() {
+  // You can modify EMAIL_RATE_LIMIT temporarily for testing
+  // For example: EMAIL_RATE_LIMIT = 2; // Test with only 2 emails per batch
+
+  const testFormData = {
+    selectedBatch: "test",
+    enableABTesting: false,
+    subjectLine: "Test Subject"  // Make sure you have a Gmail draft with this subject
+  };
+
+  console.log('Testing rate limiting functionality');
+  processBatchSelection(testFormData);
+}
+
+/**
+ * Utility function to clear any stuck job states during testing
+ */
+function clearTestJobState() {
+  clearJobState();
+  console.log('Test job state cleared');
+}
+
+/**
  * Helper function to list all Gmail draft subject lines
  * Run this to see what drafts you have available
  */
@@ -647,5 +847,234 @@ function listGmailDrafts() {
     }
   } catch (error) {
     console.error('Error listing drafts:', error);
+  }
+}
+
+// ============================================================================
+// RATE LIMITING AND JOB MANAGEMENT FUNCTIONS
+// ============================================================================
+
+/**
+ * Gets the current active job state from script properties
+ * @return {Object|null} Job state object or null if no active job
+ */
+function getActiveJobState() {
+  const properties = PropertiesService.getScriptProperties();
+  const jobStateJson = properties.getProperty('ACTIVE_EMAIL_JOB');
+
+  if (!jobStateJson) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(jobStateJson);
+  } catch (error) {
+    console.error('Error parsing job state:', error);
+    return null;
+  }
+}
+
+/**
+ * Saves the current job state to script properties
+ * @param {Object} jobState - Job state object to save
+ */
+function saveJobState(jobState) {
+  const properties = PropertiesService.getScriptProperties();
+  properties.setProperty('ACTIVE_EMAIL_JOB', JSON.stringify(jobState));
+}
+
+/**
+ * Clears the active job state and any associated triggers
+ */
+function clearJobState() {
+  const properties = PropertiesService.getScriptProperties();
+  const jobState = getActiveJobState();
+
+  // Clean up any triggers
+  if (jobState && jobState.triggerId) {
+    try {
+      const triggers = ScriptApp.getProjectTriggers();
+      const trigger = triggers.find(t => t.getUniqueId() === jobState.triggerId);
+      if (trigger) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    } catch (error) {
+      console.error('Error cleaning up trigger:', error);
+    }
+  }
+
+  properties.deleteProperty('ACTIVE_EMAIL_JOB');
+}
+
+/**
+ * Creates a time-based trigger to resume email sending after the rate limit period
+ * @return {string} Trigger ID
+ */
+function createResumeTrigger() {
+  const trigger = ScriptApp.newTrigger('resumeEmailSending')
+    .timeBased()
+    .after(RESUME_DELAY_HOURS * 60 * 60 * 1000) // Convert hours to milliseconds
+    .create();
+
+  return trigger.getUniqueId();
+}
+
+/**
+ * Shows the current job status to the user
+ */
+function showJobStatus() {
+  const jobState = getActiveJobState();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!jobState) {
+    ui.alert('No Active Job', 'There is no active email sending job.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const progress = `${jobState.emailsSent} of ${jobState.totalEmails}`;
+  const percentage = Math.round((jobState.emailsSent / jobState.totalEmails) * 100);
+  const nextResumeTime = jobState.nextResumeTime ? new Date(jobState.nextResumeTime).toLocaleString() : 'Unknown';
+
+  const message = `Active Email Job Status:\n\n` +
+    `Batch: ${jobState.batchId}\n` +
+    `Progress: ${progress} emails (${percentage}%)\n` +
+    `Started: ${new Date(jobState.startTime).toLocaleString()}\n` +
+    `Next Resume: ${nextResumeTime}\n` +
+    `Resume Attempts: ${jobState.resumeCount}/${MAX_RESUME_ATTEMPTS}`;
+
+  ui.alert('Job Status', message, ui.ButtonSet.OK);
+}
+
+/**
+ * Cancels the active email job
+ */
+function cancelActiveJob() {
+  const jobState = getActiveJobState();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!jobState) {
+    ui.alert('No Active Job', 'There is no active email sending job to cancel.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const response = ui.alert('Cancel Job',
+    `Are you sure you want to cancel the active email job for batch "${jobState.batchId}"?\n\n` +
+    `Progress: ${jobState.emailsSent} of ${jobState.totalEmails} emails sent.`,
+    ui.ButtonSet.YES_NO);
+
+  if (response === ui.Button.YES) {
+    clearJobState();
+    ui.alert('Job Cancelled', 'The active email job has been cancelled.', ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Main function called by time-based trigger to resume email sending
+ */
+function resumeEmailSending() {
+  try {
+    const jobState = getActiveJobState();
+
+    if (!jobState) {
+      console.log('No active job found to resume');
+      return;
+    }
+
+    // Check if we've exceeded maximum resume attempts
+    if (jobState.resumeCount >= MAX_RESUME_ATTEMPTS) {
+      console.error('Maximum resume attempts exceeded for job:', jobState.batchId);
+      clearJobState();
+      return;
+    }
+
+    console.log(`Resuming email job for batch: ${jobState.batchId}, attempt ${jobState.resumeCount + 1}`);
+
+    // Resume the appropriate type of email sending
+    if (jobState.isABTest) {
+      resumeABTestEmails(jobState);
+    } else {
+      resumeRegularEmails(jobState);
+    }
+
+  } catch (error) {
+    console.error('Error resuming email sending:', error);
+
+    // Try to update job state with error info
+    const jobState = getActiveJobState();
+    if (jobState) {
+      jobState.lastError = error.message;
+      jobState.lastErrorTime = new Date().toISOString();
+      saveJobState(jobState);
+    }
+  }
+}
+
+/**
+ * Counts pending emails for a batch
+ * @param {Sheet} sheet - The spreadsheet sheet
+ * @param {string} batchId - The batch identifier
+ * @return {number} Number of pending emails
+ */
+function countPendingEmails(sheet, batchId) {
+  const dataRange = sheet.getDataRange();
+  const data = dataRange.getDisplayValues();
+  const heads = data.shift();
+
+  const emailSentColIdx = heads.indexOf(EMAIL_SENT_COL);
+  const batchColIdx = heads.indexOf(BATCH_COL);
+
+  if (emailSentColIdx === -1 || batchColIdx === -1) {
+    throw new Error('Required columns not found');
+  }
+
+  let pendingCount = 0;
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const batchMatches = row[batchColIdx] === batchId;
+    const notSent = row[emailSentColIdx] === '';
+
+    if (batchMatches && notSent) {
+      pendingCount++;
+    }
+  }
+
+  return pendingCount;
+}
+
+/**
+ * Resumes regular email sending from saved state
+ * @param {Object} jobState - Saved job state
+ */
+function resumeRegularEmails(jobState) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+
+    console.log(`Resuming regular emails for batch: ${jobState.batchId}`);
+
+    // Call sendEmails with resume state
+    sendEmails(jobState.subjectLine, sheet, jobState.batchId, jobState);
+
+  } catch (error) {
+    console.error('Error resuming regular emails:', error);
+    throw error;
+  }
+}
+
+/**
+ * Resumes A/B test email sending from saved state
+ * @param {Object} jobState - Saved job state
+ */
+function resumeABTestEmails(jobState) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+
+    console.log(`Resuming A/B test emails for batch: ${jobState.batchId}`);
+
+    // Call sendABTestEmails with resume state
+    sendABTestEmails(jobState.subjectA, jobState.subjectB, sheet, jobState.batchId, jobState);
+
+  } catch (error) {
+    console.error('Error resuming A/B test emails:', error);
+    throw error;
   }
 }

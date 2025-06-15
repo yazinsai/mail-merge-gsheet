@@ -240,6 +240,14 @@
                 </div>
             </div>
 
+            <!-- Rate limiting information -->
+            <div class="warning-text">
+                <strong>Rate Limiting:</strong> Gmail limits email sending to 100 emails per hour.
+                For large batches (1000+ emails), the system will automatically pause and resume
+                sending every hour until all emails are sent. You can check progress or cancel
+                the job using the "Mail Merge" menu.
+            </div>
+
             <div class="button-container">
                 <button type="button" class="cancel-btn" onclick="google.script.host.close()">Cancel</button>
                 <button type="submit" id="submitBtn">Send Emails</button>
