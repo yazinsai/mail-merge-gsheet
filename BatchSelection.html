@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            margin: 0;
+        }
+
+        .form-container {
+            margin: 0 auto;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        select, input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        select:focus, input[type="text"]:focus {
+            outline: none;
+            border-color: #4285f4;
+            box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
+        }
+
+        .button-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 0 5px;
+        }
+
+        button:hover {
+            background-color: #3367d6;
+        }
+
+        .cancel-btn {
+            background-color: #f8f9fa;
+            color: #3c4043;
+            border: 1px solid #dadce0;
+        }
+
+        .cancel-btn:hover {
+            background-color: #f1f3f4;
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <form id="batchForm">
+            <div class="form-group">
+                <label for="batchSelect">Select Batch:</label>
+                <select id="batchSelect" name="selectedBatch" required>
+                    <option value="">-- Choose a batch --</option>
+                    <? for (var i = 0; i < batches.length; i++) { ?>
+                        <option value="<?= batches[i] ?>"><?= batches[i] ?></option>
+                    <? } ?>
+                </select>
+                <div class="info-text">Choose which batch of recipients to send emails to</div>
+            </div>
+
+            <div class="form-group">
+                <label for="subjectLine">Gmail Draft Subject Line:</label>
+                <input type="text" id="subjectLine" name="subjectLine" required
+                       placeholder="Enter the subject line of your Gmail draft">
+                <div class="info-text">This should match the subject line of your Gmail draft template</div>
+            </div>
+
+            <div class="button-container">
+                <button type="button" class="cancel-btn" onclick="google.script.host.close()">Cancel</button>
+                <button type="submit">Send Emails</button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        document.getElementById('batchForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const selectedBatch = document.getElementById('batchSelect').value;
+            const subjectLine = document.getElementById('subjectLine').value;
+
+            if (!selectedBatch || !subjectLine) {
+                alert('Please select a batch and enter a subject line.');
+                return;
+            }
+
+            // Disable the submit button to prevent double submission
+            const submitBtn = document.querySelector('button[type="submit"]');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Sending...';
+
+            // Call the server-side function
+            google.script.run
+                .withSuccessHandler(function() {
+                    google.script.host.close();
+                })
+                .withFailureHandler(function(error) {
+                    alert('Error: ' + error.message);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Send Emails';
+                })
+                .processBatchSelection({
+                    selectedBatch: selectedBatch,
+                    subjectLine: subjectLine
+                });
+        });
+    </script>
+</body>
+</html>
