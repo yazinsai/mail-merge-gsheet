@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            margin: 0;
+            background-color: #f9f9f9;
+        }
+
+        .form-container {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            max-width: 550px;
+            margin: 0 auto;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        select, input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        select:focus, input[type="text"]:focus, input[type="password"]:focus {
+            outline: none;
+            border-color: #4285f4;
+            box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+            line-height: 1.4;
+        }
+
+        .warning-text {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 12px;
+            border-radius: 4px;
+            margin: 15px 0;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .success-text {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 12px;
+            border-radius: 4px;
+            margin: 15px 0;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .service-section {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+            background-color: #fafafa;
+        }
+
+        .service-section.active {
+            background-color: #f0f8ff;
+            border-color: #4285f4;
+        }
+
+        .service-title {
+            font-weight: bold;
+            color: #1a73e8;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .button-container {
+            text-align: center;
+            margin-top: 25px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .cancel-btn {
+            background-color: #f8f9fa;
+            color: #5f6368;
+            border: 1px solid #dadce0;
+        }
+
+        .cancel-btn:hover {
+            background-color: #e8eaed;
+        }
+
+        button[type="submit"] {
+            background-color: #1a73e8;
+            color: white;
+        }
+
+        button[type="submit"]:hover {
+            background-color: #1557b0;
+        }
+
+        button:disabled {
+            background-color: #f8f9fa;
+            color: #5f6368;
+            cursor: not-allowed;
+        }
+
+        .docs-link {
+            color: #1a73e8;
+            text-decoration: none;
+        }
+
+        .docs-link:hover {
+            text-decoration: underline;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <h2 style="margin-top: 0; color: #333; text-align: center;">Email Service Settings</h2>
+        
+        <form id="settingsForm">
+            <div class="form-group">
+                <label for="emailService">Email Service:</label>
+                <select id="emailService" name="emailService" required>
+                    <option value="gmail">Gmail (Default)</option>
+                    <option value="mailersend">MailerSend</option>
+                </select>
+                <div class="info-text">Choose which email service to use for sending emails</div>
+            </div>
+
+            <!-- Gmail Section -->
+            <div id="gmailSection" class="service-section">
+                <div class="service-title">Gmail Configuration</div>
+                <div class="success-text">
+                    <strong>Gmail is ready to use!</strong><br>
+                    Uses your Google account's Gmail service with built-in rate limiting (100 emails/hour).
+                    No additional configuration required.
+                </div>
+            </div>
+
+            <!-- MailerSend Section -->
+            <div id="mailersendSection" class="service-section hidden">
+                <div class="service-title">MailerSend Configuration</div>
+                
+                <div class="warning-text">
+                    <strong>MailerSend Setup Required:</strong><br>
+                    1. Sign up at <a href="https://www.mailersend.com" target="_blank" class="docs-link">MailerSend.com</a><br>
+                    2. Verify your domain in the MailerSend dashboard<br>
+                    3. Generate an API token with email sending permissions<br>
+                    4. Review the <a href="https://developers.mailersend.com/api/v1/email.html#send-an-email" target="_blank" class="docs-link">API documentation</a>
+                </div>
+
+                <div class="form-group">
+                    <label for="mailerSendToken">MailerSend API Token:</label>
+                    <input type="password" id="mailerSendToken" name="mailerSendToken" 
+                           placeholder="Enter your MailerSend API token">
+                    <div class="info-text">Your API token from MailerSend dashboard (kept secure)</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="fromEmail">Verified Sender Email:</label>
+                    <input type="text" id="fromEmail" name="fromEmail" 
+                           placeholder="sender@yourdomain.com">
+                    <div class="info-text">Must be a verified domain or subdomain in your MailerSend account</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="fromName">Sender Name (Optional):</label>
+                    <input type="text" id="fromName" name="fromName" 
+                           placeholder="Your Name or Company">
+                    <div class="info-text">Display name for the sender (defaults to "Mail Merge")</div>
+                </div>
+
+                <div class="success-text">
+                    <strong>MailerSend Benefits:</strong><br>
+                    • Much higher sending limits (no 100/hour restriction)<br>
+                    • Professional email delivery infrastructure<br>
+                    • Advanced analytics and tracking<br>
+                    • No need for complex rate limiting and queuing
+                </div>
+            </div>
+
+            <div class="button-container">
+                <button type="button" class="cancel-btn" onclick="google.script.host.close()">Cancel</button>
+                <button type="submit" id="submitBtn">Save Settings</button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        // Load current configuration when page loads
+        google.script.run
+            .withSuccessHandler(function(config) {
+                document.getElementById('emailService').value = config.service || 'gmail';
+                
+                if (config.service === 'mailersend' && config.settings) {
+                    document.getElementById('mailerSendToken').value = config.settings.apiToken || '';
+                    document.getElementById('fromEmail').value = config.settings.fromEmail || '';
+                    document.getElementById('fromName').value = config.settings.fromName || '';
+                }
+                
+                toggleServiceSections();
+            })
+            .withFailureHandler(function(error) {
+                console.error('Error loading config:', error);
+            })
+            .getCurrentEmailServiceConfig();
+
+        // Toggle service sections based on selection
+        function toggleServiceSections() {
+            const emailService = document.getElementById('emailService').value;
+            const gmailSection = document.getElementById('gmailSection');
+            const mailersendSection = document.getElementById('mailersendSection');
+            
+            if (emailService === 'mailersend') {
+                gmailSection.classList.add('hidden');
+                gmailSection.classList.remove('active');
+                mailersendSection.classList.remove('hidden');
+                mailersendSection.classList.add('active');
+                
+                // Make MailerSend fields required
+                document.getElementById('mailerSendToken').required = true;
+                document.getElementById('fromEmail').required = true;
+            } else {
+                gmailSection.classList.remove('hidden');
+                gmailSection.classList.add('active');
+                mailersendSection.classList.add('hidden');
+                mailersendSection.classList.remove('active');
+                
+                // Make MailerSend fields optional
+                document.getElementById('mailerSendToken').required = false;
+                document.getElementById('fromEmail').required = false;
+            }
+        }
+
+        // Handle service selection change
+        document.getElementById('emailService').addEventListener('change', toggleServiceSections);
+
+        // Handle form submission
+        document.getElementById('settingsForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const formData = {
+                emailService: document.getElementById('emailService').value,
+                mailerSendToken: document.getElementById('mailerSendToken').value,
+                fromEmail: document.getElementById('fromEmail').value,
+                fromName: document.getElementById('fromName').value
+            };
+
+            // Disable the submit button to prevent double submission
+            const submitBtn = document.getElementById('submitBtn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Saving...';
+
+            // Call the server-side function
+            google.script.run
+                .withSuccessHandler(function() {
+                    google.script.host.close();
+                })
+                .withFailureHandler(function(error) {
+                    alert('Error: ' + error.message);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Save Settings';
+                })
+                .processEmailServiceSettings(formData);
+        });
+
+        // Initialize the form
+        toggleServiceSections();
+    </script>
+</body>
+</html>

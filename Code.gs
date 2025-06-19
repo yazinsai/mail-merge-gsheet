@@ -48,6 +48,9 @@ function onOpen() {
       .addItem('Cancel Active Job', 'cancelActiveJob')
       .addItem('Check Email Quotas', 'testEmailQuotas')
       .addSeparator()
+      .addItem('Email Service Settings', 'showEmailServiceSettings')
+      .addItem('Test MailerSend Configuration', 'testMailerSendConfiguration')
+      .addSeparator()
       .addItem('Remove Duplicate Email Addresses', 'removeDuplicateEmails')
       .addToUi();
 }
@@ -74,6 +77,19 @@ function showBatchSelectionDialog() {
     .setHeight(600);
 
   SpreadsheetApp.getUi().showModalDialog(html, 'Select Batch & Send Emails');
+}
+
+/**
+ * Shows the email service settings dialog
+ */
+function showEmailServiceSettings() {
+  const htmlTemplate = HtmlService.createTemplateFromFile('EmailServiceSettings');
+
+  const html = htmlTemplate.evaluate()
+    .setWidth(600)
+    .setHeight(500);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Email Service Settings');
 }
 
 /**
@@ -298,6 +314,7 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
     }
 
     // Gets the draft Gmail message to use as a template
+    // Note: Even when using MailerSend, we still use Gmail drafts for the email template
     const emailTemplate = getGmailTemplateFromDrafts_(subjectLine);
   
     // Initialize or resume job state
@@ -350,8 +367,9 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
       const batchMatches = !selectedBatch || row[BATCH_COL] === selectedBatch;
 
       if (row[EMAIL_SENT_COL] == '' && batchMatches) {
-        // Check both daily and hourly quotas
-        const quotaCheck = checkEmailQuotas(emailsSentThisSession);
+        // Check quotas (only for Gmail, MailerSend has much higher limits)
+        const emailConfig = getEmailServiceConfig();
+        const quotaCheck = checkEmailQuotas(emailsSentThisSession, emailConfig);
 
         if (!quotaCheck.canSend) {
           console.log(`Quota limit reached. Reason: ${quotaCheck.reason}`);
@@ -406,16 +424,41 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
         }
 
         try {
-          const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
+          // Get email service configuration
+          const emailConfig = getEmailServiceConfig();
 
-          GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
-            htmlBody: msgObj.html,
-            attachments: emailTemplate.attachments,
-            inlineImages: emailTemplate.inlineImages
-          });
+          if (emailConfig.service === 'mailersend') {
+            // Use MailerSend
+            const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
 
-          out.push([new Date()]);
-          emailsSentThisSession++;
+            const result = sendEmailWithMailerSend(
+              row[RECIPIENT_COL],
+              row['Name'] || row[RECIPIENT_COL], // Use Name column if available, fallback to email
+              msgObj.subject,
+              msgObj.text,
+              msgObj.html,
+              emailConfig
+            );
+
+            if (result.success) {
+              out.push([new Date()]);
+              emailsSentThisSession++;
+            } else {
+              throw new Error(`MailerSend error: ${result.error}`);
+            }
+          } else {
+            // Use Gmail (default)
+            const msgObj = fillInTemplateFromObject_(emailTemplate.message, row);
+
+            GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+              htmlBody: msgObj.html,
+              attachments: emailTemplate.attachments,
+              inlineImages: emailTemplate.inlineImages
+            });
+
+            out.push([new Date()]);
+            emailsSentThisSession++;
+          }
 
         } catch(e) {
           console.error('Error sending email:', e.message);
@@ -602,6 +645,7 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
     }
 
     // Get email templates for both versions
+    // Note: Even when using MailerSend, we still use Gmail drafts for the email templates
     const emailTemplateA = getGmailTemplateFromDrafts_(subjectA);
     const emailTemplateB = getGmailTemplateFromDrafts_(subjectB);
 
@@ -694,8 +738,9 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
       const notSent = row[EMAIL_SENT_COL] === '';
 
       if (batchMatches && notSent) {
-        // Check both daily and hourly quotas
-        const quotaCheck = checkEmailQuotas(emailsSentThisSession);
+        // Check quotas (only for Gmail, MailerSend has much higher limits)
+        const emailConfig = getEmailServiceConfig();
+        const quotaCheck = checkEmailQuotas(emailsSentThisSession, emailConfig);
 
         if (!quotaCheck.canSend) {
           console.log(`Quota limit reached. Reason: ${quotaCheck.reason}`);
@@ -770,12 +815,31 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
 
           const msgObj = fillInTemplateFromObject_(customTemplate.message, row);
 
-          // Send email
-          GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
-            htmlBody: msgObj.html,
-            attachments: emailTemplate.attachments,
-            inlineImages: emailTemplate.inlineImages
-          });
+          // Get email service configuration
+          const emailConfig = getEmailServiceConfig();
+
+          if (emailConfig.service === 'mailersend') {
+            // Use MailerSend
+            const result = sendEmailWithMailerSend(
+              row[RECIPIENT_COL],
+              row['Name'] || row[RECIPIENT_COL], // Use Name column if available, fallback to email
+              msgObj.subject,
+              msgObj.text,
+              msgObj.html,
+              emailConfig
+            );
+
+            if (!result.success) {
+              throw new Error(`MailerSend error: ${result.error}`);
+            }
+          } else {
+            // Use Gmail (default)
+            GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
+              htmlBody: msgObj.html,
+              attachments: emailTemplate.attachments,
+              inlineImages: emailTemplate.inlineImages
+            });
+          }
 
           // Record success
           emailSentUpdates.push([new Date()]);
@@ -884,17 +948,20 @@ function clearTestJobState() {
  */
 function testEmailQuotas() {
   try {
-    const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();
-    const quotaCheck = checkEmailQuotas(0); // Check with 0 emails sent this session
+    const emailConfig = getEmailServiceConfig();
+    const dailyQuotaRemaining = emailConfig.service === 'gmail' ? MailApp.getRemainingDailyQuota() : 'unlimited';
+    const quotaCheck = checkEmailQuotas(0, emailConfig); // Check with 0 emails sent this session
 
     console.log('=== Email Quota Status ===');
+    console.log(`Email service: ${emailConfig.service.toUpperCase()}`);
     console.log(`Daily quota remaining: ${dailyQuotaRemaining}`);
     console.log(`Can send emails: ${quotaCheck.canSend}`);
     console.log(`Max emails this session: ${quotaCheck.maxEmails}`);
     console.log(`Quota check reason: ${quotaCheck.reason}`);
 
     // Show in UI as well
-    const message = `Email Quota Status:\n\n` +
+    const serviceName = emailConfig.service === 'gmail' ? 'Gmail' : 'MailerSend';
+    const message = `Email Service: ${serviceName}\n\n` +
       `Daily Quota Remaining: ${dailyQuotaRemaining}\n` +
       `Can Send Emails: ${quotaCheck.canSend ? 'Yes' : 'No'}\n` +
       `Max Emails This Session: ${quotaCheck.maxEmails}\n` +
@@ -929,6 +996,233 @@ function listGmailDrafts() {
     }
   } catch (error) {
     console.error('Error listing drafts:', error);
+  }
+}
+
+// ============================================================================
+// MAILERSEND EMAIL FUNCTIONS
+// ============================================================================
+
+/**
+ * Sends an email using MailerSend API
+ * @param {string} toEmail - Recipient email address
+ * @param {string} toName - Recipient name
+ * @param {string} subject - Email subject
+ * @param {string} textContent - Plain text content
+ * @param {string} htmlContent - HTML content
+ * @param {Object} config - MailerSend configuration
+ * @return {Object} Response object with success status and message ID
+ */
+function sendEmailWithMailerSend(toEmail, toName, subject, textContent, htmlContent, config) {
+  const url = 'https://api.mailersend.com/v1/email';
+
+  const payload = {
+    from: {
+      email: config.settings.fromEmail,
+      name: config.settings.fromName
+    },
+    to: [
+      {
+        email: toEmail,
+        name: toName || toEmail
+      }
+    ],
+    subject: subject,
+    text: textContent,
+    html: htmlContent
+  };
+
+  const options = {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.settings.apiToken}`,
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest'
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseCode = response.getResponseCode();
+
+    if (responseCode === 202) {
+      // Success - email queued for sending
+      const messageId = response.getHeaders()['x-message-id'] || 'unknown';
+      return {
+        success: true,
+        messageId: messageId
+      };
+    } else {
+      // Error response
+      const responseText = response.getContentText();
+      console.error('MailerSend API error:', responseCode, responseText);
+
+      let errorMessage = `HTTP ${responseCode}`;
+      try {
+        const errorData = JSON.parse(responseText);
+        if (errorData.message) {
+          errorMessage = errorData.message;
+        }
+        if (errorData.errors) {
+          errorMessage += ': ' + JSON.stringify(errorData.errors);
+        }
+      } catch (e) {
+        errorMessage += ': ' + responseText;
+      }
+
+      return {
+        success: false,
+        error: errorMessage
+      };
+    }
+  } catch (error) {
+    console.error('Error calling MailerSend API:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ============================================================================
+// EMAIL SERVICE CONFIGURATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Gets the current email service configuration
+ * @return {Object} Configuration object with service type and settings
+ */
+function getEmailServiceConfig() {
+  const properties = PropertiesService.getScriptProperties();
+  const configJson = properties.getProperty('EMAIL_SERVICE_CONFIG');
+
+  if (!configJson) {
+    // Default to Gmail
+    return {
+      service: 'gmail',
+      settings: {}
+    };
+  }
+
+  try {
+    return JSON.parse(configJson);
+  } catch (error) {
+    console.error('Error parsing email service config:', error);
+    return {
+      service: 'gmail',
+      settings: {}
+    };
+  }
+}
+
+/**
+ * Saves the email service configuration
+ * @param {Object} config - Configuration object
+ */
+function saveEmailServiceConfig(config) {
+  const properties = PropertiesService.getScriptProperties();
+  properties.setProperty('EMAIL_SERVICE_CONFIG', JSON.stringify(config));
+}
+
+/**
+ * Processes the email service settings form data
+ * @param {Object} formData - Form data from the settings dialog
+ */
+function processEmailServiceSettings(formData) {
+  try {
+    console.log('Email service settings received:', formData);
+
+    const config = {
+      service: formData.emailService,
+      settings: {}
+    };
+
+    if (formData.emailService === 'mailersend') {
+      if (!formData.mailerSendToken) {
+        SpreadsheetApp.getUi().alert('Missing Information',
+          'Please enter your MailerSend API token.',
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      if (!formData.fromEmail) {
+        SpreadsheetApp.getUi().alert('Missing Information',
+          'Please enter your verified sender email address.',
+          SpreadsheetApp.getUi().ButtonSet.OK);
+        return;
+      }
+
+      config.settings = {
+        apiToken: formData.mailerSendToken,
+        fromEmail: formData.fromEmail,
+        fromName: formData.fromName || 'Mail Merge'
+      };
+    }
+
+    saveEmailServiceConfig(config);
+
+    SpreadsheetApp.getUi().alert('Settings Saved',
+      `Email service has been set to ${config.service === 'gmail' ? 'Gmail' : 'MailerSend'}.`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+
+  } catch (error) {
+    console.error('Error processing email service settings:', error);
+    SpreadsheetApp.getUi().alert('Settings Error',
+      `An error occurred while saving settings: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
+ * Gets the current email service configuration for the settings dialog
+ * @return {Object} Current configuration
+ */
+function getCurrentEmailServiceConfig() {
+  return getEmailServiceConfig();
+}
+
+/**
+ * Test function to verify MailerSend configuration
+ * This sends a test email to verify the MailerSend setup is working
+ */
+function testMailerSendConfiguration() {
+  const config = getEmailServiceConfig();
+
+  if (config.service !== 'mailersend') {
+    SpreadsheetApp.getUi().alert('MailerSend Not Configured',
+      'MailerSend is not currently selected as the email service. Please configure it in Email Service Settings first.',
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  // Get user's email for test
+  const userEmail = Session.getActiveUser().getEmail();
+
+  if (!userEmail) {
+    SpreadsheetApp.getUi().alert('Test Email Error',
+      'Could not determine your email address for the test. Please ensure you are logged in.',
+      SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  const result = sendEmailWithMailerSend(
+    userEmail,
+    'Test User',
+    'MailerSend Configuration Test',
+    'This is a test email to verify your MailerSend configuration is working correctly.',
+    '<p>This is a test email to verify your <strong>MailerSend configuration</strong> is working correctly.</p>',
+    config
+  );
+
+  if (result.success) {
+    SpreadsheetApp.getUi().alert('MailerSend Test Successful',
+      `Test email sent successfully!\n\nMessage ID: ${result.messageId}\n\nCheck your inbox at ${userEmail} to confirm delivery.`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  } else {
+    SpreadsheetApp.getUi().alert('MailerSend Test Failed',
+      `Test email failed to send.\n\nError: ${result.error}\n\nPlease check your MailerSend configuration and try again.`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
   }
 }
 
@@ -1137,9 +1431,26 @@ function countPendingEmails(sheet, batchId) {
 /**
  * Checks both daily and hourly email quotas to determine how many emails can be sent
  * @param {number} emailsSentThisSession - Number of emails already sent in current session
+ * @param {Object} emailConfig - Email service configuration
  * @return {Object} Object with canSend (boolean), reason (string), and maxEmails (number)
  */
-function checkEmailQuotas(emailsSentThisSession) {
+function checkEmailQuotas(emailsSentThisSession, emailConfig = null) {
+  // Get email config if not provided
+  if (!emailConfig) {
+    emailConfig = getEmailServiceConfig();
+  }
+
+  // MailerSend has much higher limits, so we can bypass most restrictions
+  if (emailConfig.service === 'mailersend') {
+    return {
+      canSend: true,
+      reason: 'mailersend_unlimited',
+      maxEmails: 999999, // Effectively unlimited for our purposes
+      dailyQuotaRemaining: 'unlimited'
+    };
+  }
+
+  // Gmail quota checking (existing logic)
   try {
     // Get remaining daily quota from Gmail
     const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();

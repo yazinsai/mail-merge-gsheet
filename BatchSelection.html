@@ -240,15 +240,9 @@
                 </div>
             </div>
 
-            <!-- Rate limiting information -->
-            <div class="warning-text">
-                <strong>Smart Rate Limiting:</strong> Gmail has both daily quotas and hourly rate limits (100 emails/hour).
-                This system automatically monitors both limits and intelligently schedules resumption:
-                <ul style="margin: 8px 0; padding-left: 20px;">
-                    <li><strong>Hourly limit reached:</strong> Resumes in 1 hour</li>
-                    <li><strong>Daily quota low:</strong> Resumes tomorrow at 12:30 AM</li>
-                </ul>
-                For large batches (1000+ emails), check progress or quotas using the "Mail Merge" menu.
+            <!-- Email service and rate limiting information -->
+            <div id="emailServiceInfo" class="warning-text">
+                <strong>Loading email service information...</strong>
             </div>
 
             <div class="button-container">
@@ -259,6 +253,51 @@
     </div>
 
     <script>
+        // Load email service configuration and update info display
+        function loadEmailServiceInfo() {
+            google.script.run
+                .withSuccessHandler(function(config) {
+                    const infoDiv = document.getElementById('emailServiceInfo');
+
+                    if (config.service === 'mailersend') {
+                        infoDiv.className = 'warning-text';
+                        infoDiv.style.backgroundColor = '#d4edda';
+                        infoDiv.style.borderColor = '#c3e6cb';
+                        infoDiv.style.color = '#155724';
+                        infoDiv.innerHTML = `
+                            <strong>MailerSend Service Active:</strong> Using MailerSend for email delivery with much higher sending limits.
+                            No rate limiting delays - emails will be sent immediately!
+                            <br><br>
+                            <strong>Sender:</strong> ${config.settings.fromEmail} (${config.settings.fromName})
+                            <br>
+                            <em>To change email service, use "Email Service Settings" in the Mail Merge menu.</em>
+                        `;
+                    } else {
+                        infoDiv.className = 'warning-text';
+                        infoDiv.innerHTML = `
+                            <strong>Gmail Service Active:</strong> Gmail has both daily quotas and hourly rate limits (100 emails/hour).
+                            This system automatically monitors both limits and intelligently schedules resumption:
+                            <ul style="margin: 8px 0; padding-left: 20px;">
+                                <li><strong>Hourly limit reached:</strong> Resumes in 1 hour</li>
+                                <li><strong>Daily quota low:</strong> Resumes tomorrow at 12:30 AM</li>
+                            </ul>
+                            For large batches (1000+ emails), check progress or quotas using the "Mail Merge" menu.
+                            <br><br>
+                            <em>To switch to MailerSend for higher limits, use "Email Service Settings" in the Mail Merge menu.</em>
+                        `;
+                    }
+                })
+                .withFailureHandler(function(error) {
+                    console.error('Error loading email service config:', error);
+                    const infoDiv = document.getElementById('emailServiceInfo');
+                    infoDiv.innerHTML = '<strong>Error loading email service information.</strong>';
+                })
+                .getCurrentEmailServiceConfig();
+        }
+
+        // Initialize email service info on page load
+        loadEmailServiceInfo();
+
         // Handle A/B testing toggle
         document.getElementById('abTestToggle').addEventListener('change', function() {
             const isABTestEnabled = this.checked;
