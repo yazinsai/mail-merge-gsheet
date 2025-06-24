@@ -265,8 +265,10 @@
                         infoDiv.style.borderColor = '#c3e6cb';
                         infoDiv.style.color = '#155724';
                         infoDiv.innerHTML = `
-                            <strong>MailerSend Service Active:</strong> Using MailerSend for email delivery with much higher sending limits.
-                            No rate limiting delays - emails will be sent immediately!
+                            <strong>MailerSend Service Active:</strong> Using MailerSend for email delivery with much higher daily limits than Gmail.
+                            <br><br>
+                            <strong>Rate Limiting:</strong> MailerSend has API limits (8 emails/minute) but no daily quotas.
+                            Emails will be sent with 8-second delays between each email to respect API limits.
                             <br><br>
                             <strong>Sender:</strong> ${config.settings.fromEmail} (${config.settings.fromName})
                             <br>
@@ -382,7 +384,13 @@
             // Call the server-side function
             google.script.run
                 .withSuccessHandler(function() {
+                    // Close this dialog and show progress dialog
                     google.script.host.close();
+
+                    // Small delay to ensure the job has started, then show progress
+                    setTimeout(function() {
+                        google.script.run.showProgressDialog();
+                    }, 500);
                 })
                 .withFailureHandler(function(error) {
                     alert('Error: ' + error.message);

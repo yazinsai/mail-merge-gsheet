@@ -35,6 +35,10 @@ const EMAIL_RATE_LIMIT = 95; // Send 95 emails per hour (leaving buffer for safe
 const RESUME_DELAY_HOURS = 1; // Wait 1 hour before resuming
 const MAX_RESUME_ATTEMPTS = 48; // Maximum 48 hours of retries
 const MIN_DAILY_QUOTA_BUFFER = 10; // Minimum daily quota to keep as buffer
+
+// MailerSend rate limiting constants
+const MAILERSEND_REQUESTS_PER_MINUTE = 8; // Conservative limit (your account allows 10/min)
+const MAILERSEND_DELAY_MS = 8000; // 8 seconds between requests (60000ms / 8 requests = 7.5s, rounded up)
  
 /**
  * Creates the menu item "Mail Merge" for user to run scripts on drop-down.
@@ -42,16 +46,18 @@ const MIN_DAILY_QUOTA_BUFFER = 10; // Minimum daily quota to keep as buffer
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Mail Merge')
-      .addItem('Select Batch & Send Emails', 'showBatchSelectionDialog')
+      .addItem('📧 Send Emails', 'showBatchSelectionDialog')
+      .addItem('📊 Job Progress & Status', 'showProgressDialog')
       .addSeparator()
-      .addItem('Check Job Status', 'showJobStatus')
-      .addItem('Cancel Active Job', 'cancelActiveJob')
-      .addItem('Check Email Quotas', 'testEmailQuotas')
-      .addSeparator()
-      .addItem('Email Service Settings', 'showEmailServiceSettings')
-      .addItem('Test MailerSend Configuration', 'testMailerSendConfiguration')
-      .addSeparator()
-      .addItem('Remove Duplicate Email Addresses', 'removeDuplicateEmails')
+      .addSubMenu(ui.createMenu('⚙️ Settings & Tools')
+          .addItem('Email Service Settings', 'showEmailServiceSettings')
+          .addItem('Test MailerSend Configuration', 'testMailerSendConfiguration')
+          .addItem('Check Email Quotas', 'testEmailQuotas')
+          .addItem('🔍 Debug Job Status', 'debugJobStatus')
+          .addItem('▶️ Manually Resume Job', 'manuallyResumeJob')
+          .addSeparator()
+          .addItem('Remove Duplicate Emails', 'removeDuplicateEmails')
+          .addItem('🧹 Cleanup All Triggers', 'cleanupAllTriggers'))
       .addToUi();
 }
 
@@ -90,6 +96,19 @@ function showEmailServiceSettings() {
     .setHeight(500);
 
   SpreadsheetApp.getUi().showModalDialog(html, 'Email Service Settings');
+}
+
+/**
+ * Shows the progress dialog for active email jobs
+ */
+function showProgressDialog() {
+  const htmlTemplate = HtmlService.createTemplateFromFile('ProgressDialog');
+
+  const html = htmlTemplate.evaluate()
+    .setWidth(550)
+    .setHeight(500);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Email Sending Progress');
 }
 
 /**
@@ -379,7 +398,41 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
 
           let alertTitle, alertMessage, shouldScheduleResume = true;
 
-          if (quotaCheck.reason === 'daily_quota_exhausted') {
+          if (quotaCheck.reason === 'mailersend_api_rate_limit') {
+            // MailerSend API rate limit - wait 1 minute and resume
+            alertTitle = 'MailerSend API Rate Limit';
+            alertMessage = `MailerSend API rate limit reached (10 requests/minute). ` +
+              `The system will automatically resume sending in 1 minute.`;
+
+            // Schedule resume in 1 minute
+            const resumeTime = new Date(Date.now() + 60000); // 1 minute from now
+
+            // Clean up any existing triggers first
+            if (jobState.triggerId) {
+              try {
+                const triggers = ScriptApp.getProjectTriggers();
+                const oldTrigger = triggers.find(t => t.getUniqueId() === jobState.triggerId);
+                if (oldTrigger) {
+                  ScriptApp.deleteTrigger(oldTrigger);
+                }
+              } catch (e) {
+                console.error('Error cleaning up old trigger:', e);
+              }
+            }
+
+            const trigger = ScriptApp.newTrigger('resumeEmailSending')
+              .timeBased()
+              .at(resumeTime)
+              .create();
+
+            jobState.triggerId = trigger.getUniqueId();
+            saveJobState(jobState);
+          } else if (quotaCheck.reason === 'mailersend_batch_limit') {
+            // MailerSend batch limit reached - this shouldn't happen with proper rate limiting
+            alertTitle = 'MailerSend Batch Limit';
+            alertMessage = `MailerSend batch limit reached. The system will resume in 1 minute.`;
+            shouldScheduleResume = true;
+          } else if (quotaCheck.reason === 'daily_quota_exhausted') {
             // Daily quota exhausted - schedule resume for tomorrow
             const tomorrow = new Date();
             tomorrow.setDate(tomorrow.getDate() + 1);
@@ -443,6 +496,17 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
             if (result.success) {
               out.push([new Date()]);
               emailsSentThisSession++;
+
+              // Update job state with current progress (increment by 1 for this email)
+              jobState.emailsSent++;
+              jobState.lastEmailTime = new Date().toISOString();
+              saveJobState(jobState);
+
+              // Add delay between MailerSend requests to respect rate limits
+              if (emailsSentThisSession < obj.length) { // Don't delay after the last email
+                console.log(`MailerSend: Waiting ${MAILERSEND_DELAY_MS/1000} seconds before next email...`);
+                Utilities.sleep(MAILERSEND_DELAY_MS);
+              }
             } else {
               throw new Error(`MailerSend error: ${result.error}`);
             }
@@ -458,6 +522,11 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
 
             out.push([new Date()]);
             emailsSentThisSession++;
+
+            // Update job state with current progress (increment by 1 for this email)
+            jobState.emailsSent++;
+            jobState.lastEmailTime = new Date().toISOString();
+            saveJobState(jobState);
           }
 
         } catch(e) {
@@ -486,7 +555,12 @@ function sendEmails(subjectLine, sheet=SpreadsheetApp.getActiveSheet(), selected
     // Update the sheet with results
     sheet.getRange(2, emailSentColIdx + 1, out.length).setValues(out);
 
-    // Job completed successfully
+    // Job completed successfully - update final state and clear
+    jobState.emailsSent += emailsSentThisSession;
+    jobState.completedTime = new Date().toISOString();
+    saveJobState(jobState);
+
+    // Clear job state and triggers
     clearJobState();
 
     SpreadsheetApp.getUi().alert('Emails Sent Successfully',
@@ -750,7 +824,41 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
 
           let alertTitle, alertMessage, shouldScheduleResume = true;
 
-          if (quotaCheck.reason === 'daily_quota_exhausted') {
+          if (quotaCheck.reason === 'mailersend_api_rate_limit') {
+            // MailerSend API rate limit - wait 1 minute and resume
+            alertTitle = 'MailerSend API Rate Limit';
+            alertMessage = `MailerSend API rate limit reached (10 requests/minute). ` +
+              `The A/B test will automatically resume in 1 minute.`;
+
+            // Schedule resume in 1 minute
+            const resumeTime = new Date(Date.now() + 60000); // 1 minute from now
+
+            // Clean up any existing triggers first
+            if (jobState.triggerId) {
+              try {
+                const triggers = ScriptApp.getProjectTriggers();
+                const oldTrigger = triggers.find(t => t.getUniqueId() === jobState.triggerId);
+                if (oldTrigger) {
+                  ScriptApp.deleteTrigger(oldTrigger);
+                }
+              } catch (e) {
+                console.error('Error cleaning up old trigger:', e);
+              }
+            }
+
+            const trigger = ScriptApp.newTrigger('resumeEmailSending') // Use same function for consistency
+              .timeBased()
+              .at(resumeTime)
+              .create();
+
+            jobState.triggerId = trigger.getUniqueId();
+            saveJobState(jobState);
+          } else if (quotaCheck.reason === 'mailersend_batch_limit') {
+            // MailerSend batch limit reached
+            alertTitle = 'MailerSend Batch Limit';
+            alertMessage = `MailerSend batch limit reached. The A/B test will resume in 1 minute.`;
+            shouldScheduleResume = true;
+          } else if (quotaCheck.reason === 'daily_quota_exhausted') {
             // Daily quota exhausted - schedule resume for tomorrow
             const tomorrow = new Date();
             tomorrow.setDate(tomorrow.getDate() + 1);
@@ -832,6 +940,12 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
             if (!result.success) {
               throw new Error(`MailerSend error: ${result.error}`);
             }
+
+            // Add delay between MailerSend requests to respect rate limits
+            if (emailsSentThisSession < obj.length - 1) { // Don't delay after the last email
+              console.log(`MailerSend A/B: Waiting ${MAILERSEND_DELAY_MS/1000} seconds before next email...`);
+              Utilities.sleep(MAILERSEND_DELAY_MS);
+            }
           } else {
             // Use Gmail (default)
             GmailApp.sendEmail(row[RECIPIENT_COL], msgObj.subject, msgObj.text, {
@@ -845,6 +959,11 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
           emailSentUpdates.push([new Date()]);
           versionUpdates.push([version]);
           emailsSentThisSession++;
+
+          // Update job state with current progress (increment by 1 for this email)
+          jobState.emailsSent++;
+          jobState.lastEmailTime = new Date().toISOString();
+          saveJobState(jobState);
 
         } catch(e) {
           console.error('Error sending A/B test email:', e.message);
@@ -877,7 +996,12 @@ function sendABTestEmails(subjectA, subjectB, sheet = SpreadsheetApp.getActiveSh
     sheet.getRange(2, emailSentColIdx + 1, emailSentUpdates.length).setValues(emailSentUpdates);
     sheet.getRange(2, versionColIdx + 1, versionUpdates.length).setValues(versionUpdates);
 
-    // Job completed successfully
+    // Job completed successfully - update final state and clear
+    jobState.emailsSent += emailsSentThisSession;
+    jobState.completedTime = new Date().toISOString();
+    saveJobState(jobState);
+
+    // Clear job state and triggers
     clearJobState();
 
     // Count final versions for reporting
@@ -978,6 +1102,109 @@ function testEmailQuotas() {
 }
 
 /**
+ * Debug function to check current job status and triggers
+ * This helps diagnose why email sending might have stopped
+ */
+function debugJobStatus() {
+  try {
+    const jobState = getActiveJobState();
+    const triggers = ScriptApp.getProjectTriggers();
+    const emailTriggers = triggers.filter(trigger => trigger.getHandlerFunction() === 'resumeEmailSending');
+
+    console.log('=== Job Debug Status ===');
+    console.log('Active job state:', jobState);
+    console.log(`Total triggers: ${triggers.length}`);
+    console.log(`Email resume triggers: ${emailTriggers.length}`);
+
+    if (emailTriggers.length > 0) {
+      emailTriggers.forEach((trigger, index) => {
+        console.log(`Trigger ${index + 1}: ID=${trigger.getUniqueId()}, Handler=${trigger.getHandlerFunction()}`);
+      });
+    }
+
+    let message = '';
+    if (!jobState) {
+      message = 'No active job found. The job may have completed or been cancelled.';
+    } else {
+      message = `Active Job Found:\n` +
+        `Batch: ${jobState.batchId}\n` +
+        `Progress: ${jobState.emailsSent} of ${jobState.totalEmails} emails\n` +
+        `Resume Count: ${jobState.resumeCount || 0}\n` +
+        `Next Resume Time: ${jobState.nextResumeTime || 'Not set'}\n` +
+        `Trigger ID: ${jobState.triggerId || 'None'}\n\n` +
+        `Active Resume Triggers: ${emailTriggers.length}`;
+    }
+
+    SpreadsheetApp.getUi().alert('Job Debug Status', message, SpreadsheetApp.getUi().ButtonSet.OK);
+
+  } catch (error) {
+    console.error('Error in debugJobStatus:', error);
+    SpreadsheetApp.getUi().alert('Debug Error',
+      `Error checking job status: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
+ * Manually resume a stuck email job
+ * This can be used when the automatic resume isn't working
+ */
+function manuallyResumeJob() {
+  try {
+    const jobState = getActiveJobState();
+
+    if (!jobState) {
+      SpreadsheetApp.getUi().alert('No Active Job',
+        'There is no active email job to resume.',
+        SpreadsheetApp.getUi().ButtonSet.OK);
+      return;
+    }
+
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.alert('Resume Job',
+      `Do you want to manually resume the email job for batch "${jobState.batchId}"?\n\n` +
+      `Current progress: ${jobState.emailsSent} of ${jobState.totalEmails} emails sent.\n\n` +
+      `This will attempt to continue sending emails immediately.`,
+      ui.ButtonSet.YES_NO);
+
+    if (response === ui.Button.YES) {
+      console.log('Manually resuming email job...');
+
+      // Clear any existing triggers to prevent conflicts
+      if (jobState.triggerId) {
+        try {
+          const triggers = ScriptApp.getProjectTriggers();
+          const oldTrigger = triggers.find(t => t.getUniqueId() === jobState.triggerId);
+          if (oldTrigger) {
+            ScriptApp.deleteTrigger(oldTrigger);
+          }
+        } catch (e) {
+          console.error('Error cleaning up old trigger:', e);
+        }
+      }
+
+      // Clear the next resume time to allow immediate resumption
+      jobState.nextResumeTime = null;
+      jobState.triggerId = null;
+      saveJobState(jobState);
+
+      // Resume the job
+      resumeEmailSending();
+
+      ui.alert('Job Resumed',
+        'The email job has been manually resumed. Check the progress dialog for updates.',
+        ui.ButtonSet.OK);
+    }
+
+  } catch (error) {
+    console.error('Error in manuallyResumeJob:', error);
+    SpreadsheetApp.getUi().alert('Resume Error',
+      `Error resuming job: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
  * Helper function to list all Gmail draft subject lines
  * Run this to see what drafts you have available
  */
@@ -1004,7 +1231,82 @@ function listGmailDrafts() {
 // ============================================================================
 
 /**
- * Sends an email using MailerSend API
+ * Manages MailerSend API rate limiting by tracking request timestamps
+ * @return {boolean} True if we can make a request now, false if we need to wait
+ */
+function checkMailerSendRateLimit() {
+  const properties = PropertiesService.getScriptProperties();
+  const now = new Date().getTime();
+
+  // Get the last request timestamps (stored as JSON array)
+  const lastRequestsJson = properties.getProperty('MAILERSEND_LAST_REQUESTS');
+  let lastRequests = [];
+
+  if (lastRequestsJson) {
+    try {
+      lastRequests = JSON.parse(lastRequestsJson);
+    } catch (e) {
+      console.error('Error parsing MailerSend request history:', e);
+      lastRequests = [];
+    }
+  }
+
+  // Remove requests older than 1 minute
+  const oneMinuteAgo = now - 60000;
+  lastRequests = lastRequests.filter(timestamp => timestamp > oneMinuteAgo);
+
+  // Check if we're under the rate limit
+  if (lastRequests.length >= MAILERSEND_REQUESTS_PER_MINUTE) {
+    return false; // Rate limit exceeded
+  }
+
+  // Add current request timestamp
+  lastRequests.push(now);
+
+  // Save updated timestamps
+  properties.setProperty('MAILERSEND_LAST_REQUESTS', JSON.stringify(lastRequests));
+
+  return true; // OK to make request
+}
+
+/**
+ * Waits for MailerSend rate limit to allow next request
+ */
+function waitForMailerSendRateLimit() {
+  const properties = PropertiesService.getScriptProperties();
+  const lastRequestsJson = properties.getProperty('MAILERSEND_LAST_REQUESTS');
+
+  if (!lastRequestsJson) {
+    return; // No previous requests, no need to wait
+  }
+
+  try {
+    const lastRequests = JSON.parse(lastRequestsJson);
+    const now = new Date().getTime();
+    const oneMinuteAgo = now - 60000;
+
+    // Get requests from the last minute
+    const recentRequests = lastRequests.filter(timestamp => timestamp > oneMinuteAgo);
+
+    if (recentRequests.length >= MAILERSEND_REQUESTS_PER_MINUTE) {
+      // Calculate how long to wait
+      const oldestRecentRequest = Math.min(...recentRequests);
+      const waitTime = (oldestRecentRequest + 60000) - now;
+
+      if (waitTime > 0) {
+        console.log(`MailerSend rate limit reached. Waiting ${Math.ceil(waitTime/1000)} seconds...`);
+        Utilities.sleep(waitTime);
+      }
+    }
+  } catch (e) {
+    console.error('Error in waitForMailerSendRateLimit:', e);
+    // If there's an error, wait the standard delay to be safe
+    Utilities.sleep(MAILERSEND_DELAY_MS);
+  }
+}
+
+/**
+ * Sends an email using MailerSend API with rate limiting
  * @param {string} toEmail - Recipient email address
  * @param {string} toName - Recipient name
  * @param {string} subject - Email subject
@@ -1014,6 +1316,10 @@ function listGmailDrafts() {
  * @return {Object} Response object with success status and message ID
  */
 function sendEmailWithMailerSend(toEmail, toName, subject, textContent, htmlContent, config) {
+  // Check and wait for rate limit if necessary
+  if (!checkMailerSendRateLimit()) {
+    waitForMailerSendRateLimit();
+  }
   const url = 'https://api.mailersend.com/v1/email';
 
   const payload = {
@@ -1266,20 +1572,54 @@ function clearJobState() {
   const properties = PropertiesService.getScriptProperties();
   const jobState = getActiveJobState();
 
-  // Clean up any triggers
+  // Clean up any triggers associated with this job
   if (jobState && jobState.triggerId) {
     try {
       const triggers = ScriptApp.getProjectTriggers();
       const trigger = triggers.find(t => t.getUniqueId() === jobState.triggerId);
       if (trigger) {
         ScriptApp.deleteTrigger(trigger);
+        console.log('Deleted trigger:', jobState.triggerId);
       }
     } catch (error) {
-      console.error('Error cleaning up trigger:', error);
+      console.error('Error cleaning up specific trigger:', error);
     }
   }
 
+  // Also clean up any orphaned email-related triggers as a safety measure
+  cleanupOrphanedTriggers();
+
   properties.deleteProperty('ACTIVE_EMAIL_JOB');
+}
+
+/**
+ * Cleans up orphaned triggers that may be left over from previous jobs
+ */
+function cleanupOrphanedTriggers() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    const emailTriggers = triggers.filter(trigger => {
+      const handlerFunction = trigger.getHandlerFunction();
+      return handlerFunction === 'resumeEmailSending';
+    });
+
+    console.log(`Found ${emailTriggers.length} email-related triggers`);
+
+    // If we have more than 2 email triggers, something's wrong - clean them up
+    if (emailTriggers.length > 2) {
+      console.log('Cleaning up excess email triggers...');
+      emailTriggers.forEach(trigger => {
+        try {
+          ScriptApp.deleteTrigger(trigger);
+          console.log('Deleted orphaned trigger:', trigger.getUniqueId());
+        } catch (error) {
+          console.error('Error deleting orphaned trigger:', error);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error in cleanupOrphanedTriggers:', error);
+  }
 }
 
 /**
@@ -1287,55 +1627,142 @@ function clearJobState() {
  * @return {string} Trigger ID
  */
 function createResumeTrigger() {
+  // Clean up any existing triggers first to prevent accumulation
+  cleanupOrphanedTriggers();
+
   const trigger = ScriptApp.newTrigger('resumeEmailSending')
     .timeBased()
     .after(RESUME_DELAY_HOURS * 60 * 60 * 1000) // Convert hours to milliseconds
     .create();
 
+  console.log('Created resume trigger:', trigger.getUniqueId());
   return trigger.getUniqueId();
 }
 
 /**
- * Shows the current job status to the user
+ * Emergency function to clean up ALL triggers (use if you get "too many triggers" error)
  */
-function showJobStatus() {
-  const jobState = getActiveJobState();
-  const ui = SpreadsheetApp.getUi();
-
-  if (!jobState) {
-    ui.alert('No Active Job', 'There is no active email sending job.', ui.ButtonSet.OK);
-    return;
-  }
-
-  const progress = `${jobState.emailsSent} of ${jobState.totalEmails}`;
-  const percentage = Math.round((jobState.emailsSent / jobState.totalEmails) * 100);
-  const nextResumeTime = jobState.nextResumeTime ? new Date(jobState.nextResumeTime).toLocaleString() : 'Unknown';
-
-  // Get current daily quota
-  let dailyQuotaInfo = '';
+function cleanupAllTriggers() {
   try {
-    const dailyQuotaRemaining = MailApp.getRemainingDailyQuota();
-    dailyQuotaInfo = `\nDaily Quota Remaining: ${dailyQuotaRemaining}`;
+    const triggers = ScriptApp.getProjectTriggers();
+    console.log(`Found ${triggers.length} total triggers`);
+
+    let deletedCount = 0;
+    triggers.forEach(trigger => {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+        deletedCount++;
+      } catch (error) {
+        console.error('Error deleting trigger:', error);
+      }
+    });
+
+    console.log(`Deleted ${deletedCount} triggers`);
+
+    // Also clear any active job state since triggers are gone
+    const properties = PropertiesService.getScriptProperties();
+    properties.deleteProperty('ACTIVE_EMAIL_JOB');
+
+    SpreadsheetApp.getUi().alert('Triggers Cleaned Up',
+      `Deleted ${deletedCount} triggers and cleared job state.\n\n` +
+      `You can now start new email jobs without the "too many triggers" error.`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+
   } catch (error) {
-    dailyQuotaInfo = '\nDaily Quota: Unable to check';
+    console.error('Error in cleanupAllTriggers:', error);
+    SpreadsheetApp.getUi().alert('Cleanup Error',
+      `Error cleaning up triggers: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
   }
-
-  const message = `Active Email Job Status:\n\n` +
-    `Batch: ${jobState.batchId}\n` +
-    `Type: ${jobState.isABTest ? 'A/B Test' : 'Regular Email'}\n` +
-    `Progress: ${progress} emails (${percentage}%)\n` +
-    `Started: ${new Date(jobState.startTime).toLocaleString()}\n` +
-    `Next Resume: ${nextResumeTime}\n` +
-    `Resume Attempts: ${jobState.resumeCount}/${MAX_RESUME_ATTEMPTS}` +
-    dailyQuotaInfo;
-
-  ui.alert('Job Status', message, ui.ButtonSet.OK);
 }
 
 /**
- * Cancels the active email job
+ * Gets detailed job progress data for the progress dialog
+ * @return {Object} Job progress data
+ */
+function getJobProgress() {
+  const jobState = getActiveJobState();
+  const emailConfig = getEmailServiceConfig();
+
+  if (!jobState) {
+    return {
+      active: false,
+      message: 'No active email job'
+    };
+  }
+
+  // Calculate if job is complete
+  const isComplete = jobState.emailsSent >= jobState.totalEmails;
+
+  // Determine if job is paused (has a next resume time in the future)
+  const isPaused = jobState.nextResumeTime && new Date(jobState.nextResumeTime) > new Date();
+
+  // Get pause reason
+  let pauseReason = '';
+  if (isPaused) {
+    const resumeTime = new Date(jobState.nextResumeTime);
+    const now = new Date();
+    const minutesUntilResume = Math.ceil((resumeTime - now) / 1000 / 60);
+
+    if (minutesUntilResume > 60) {
+      const hoursUntilResume = Math.ceil(minutesUntilResume / 60);
+      pauseReason = `Rate limit reached. Resuming in ${hoursUntilResume} hour(s) at ${resumeTime.toLocaleTimeString()}.`;
+    } else {
+      pauseReason = `Rate limit reached. Resuming in ${minutesUntilResume} minute(s) at ${resumeTime.toLocaleTimeString()}.`;
+    }
+  }
+
+  return {
+    active: true,
+    batchId: jobState.batchId,
+    emailService: emailConfig.service || 'gmail',
+    isABTest: jobState.isABTest || false,
+    totalEmails: jobState.totalEmails,
+    emailsSent: jobState.emailsSent,
+    startTime: jobState.startTime,
+    nextResumeTime: jobState.nextResumeTime,
+    resumeCount: jobState.resumeCount || 0,
+    isComplete: isComplete,
+    isPaused: isPaused,
+    pauseReason: pauseReason,
+    lastUpdated: new Date().toISOString()
+  };
+}
+
+/**
+ * Shows the current job status to the user (legacy function, now redirects to progress dialog)
+ */
+function showJobStatus() {
+  const jobState = getActiveJobState();
+
+  if (!jobState) {
+    SpreadsheetApp.getUi().alert('No Active Job', 'There is no active email sending job.', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  // Show the progress dialog instead of the old alert
+  showProgressDialog();
+}
+
+/**
+ * Cancels the active email job (called from progress dialog)
+ * @return {boolean} True if job was cancelled, false if no job or user cancelled
  */
 function cancelActiveJob() {
+  const jobState = getActiveJobState();
+
+  if (!jobState) {
+    throw new Error('No active email sending job to cancel.');
+  }
+
+  clearJobState();
+  return true;
+}
+
+/**
+ * Cancels the active email job with UI confirmation (called from menu)
+ */
+function cancelActiveJobWithConfirmation() {
   const jobState = getActiveJobState();
   const ui = SpreadsheetApp.getUi();
 
@@ -1440,12 +1867,27 @@ function checkEmailQuotas(emailsSentThisSession, emailConfig = null) {
     emailConfig = getEmailServiceConfig();
   }
 
-  // MailerSend has much higher limits, so we can bypass most restrictions
+  // MailerSend has API rate limits (requests per minute), but much higher email limits
   if (emailConfig.service === 'mailersend') {
+    // Check if we can make API requests (rate limit check)
+    const canMakeRequest = checkMailerSendRateLimit();
+
+    if (!canMakeRequest) {
+      return {
+        canSend: false,
+        reason: 'mailersend_api_rate_limit',
+        maxEmails: 0,
+        dailyQuotaRemaining: 'unlimited'
+      };
+    }
+
+    // For MailerSend, we can continue sending as long as the rate limit check passes
+    // The rate limiting is handled by checkMailerSendRateLimit() which tracks requests per minute
+    // No need to limit based on emailsSentThisSession since MailerSend has much higher limits
     return {
       canSend: true,
-      reason: 'mailersend_unlimited',
-      maxEmails: 999999, // Effectively unlimited for our purposes
+      reason: 'mailersend_ready',
+      maxEmails: 1000, // Allow large batches since MailerSend handles the rate limiting
       dailyQuotaRemaining: 'unlimited'
     };
   }

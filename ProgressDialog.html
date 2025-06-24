@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            margin: 0;
+            background-color: #f9f9f9;
+        }
+
+        .progress-container {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .progress-header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .progress-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .progress-subtitle {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .progress-bar-container {
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            height: 20px;
+            margin: 20px 0;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-bar {
+            background: linear-gradient(90deg, #4285f4, #34a853);
+            height: 100%;
+            border-radius: 10px;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+
+        .progress-bar.paused {
+            background: linear-gradient(90deg, #ff9800, #f57c00);
+        }
+
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 12px;
+            font-weight: bold;
+            color: #333;
+            text-shadow: 1px 1px 2px rgba(255,255,255,0.8);
+        }
+
+        .progress-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #1a73e8;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        .status-section {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #4285f4;
+            background-color: #f8f9fa;
+        }
+
+        .status-section.paused {
+            border-left-color: #ff9800;
+            background-color: #fff3e0;
+        }
+
+        .status-section.error {
+            border-left-color: #d93025;
+            background-color: #fce8e6;
+        }
+
+        .status-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #333;
+        }
+
+        .status-message {
+            font-size: 14px;
+            line-height: 1.4;
+            color: #555;
+        }
+
+        .button-container {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .refresh-btn {
+            background-color: #1a73e8;
+            color: white;
+        }
+
+        .refresh-btn:hover {
+            background-color: #1557b0;
+        }
+
+        .cancel-btn {
+            background-color: #d93025;
+            color: white;
+        }
+
+        .cancel-btn:hover {
+            background-color: #b52d20;
+        }
+
+        .close-btn {
+            background-color: #f8f9fa;
+            color: #5f6368;
+            border: 1px solid #dadce0;
+        }
+
+        .close-btn:hover {
+            background-color: #e8eaed;
+        }
+
+        .auto-refresh {
+            font-size: 12px;
+            color: #666;
+            margin-top: 10px;
+        }
+
+        .loading {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+        }
+
+        .time-info {
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+            margin-top: 10px;
+        }
+
+        .service-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-left: 8px;
+        }
+
+        .service-badge.gmail {
+            background-color: #ea4335;
+            color: white;
+        }
+
+        .service-badge.mailersend {
+            background-color: #00d4aa;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="progress-container">
+        <div class="progress-header">
+            <div class="progress-title">Email Sending Progress</div>
+            <div class="progress-subtitle" id="batchInfo">Loading...</div>
+        </div>
+
+        <div class="progress-bar-container">
+            <div class="progress-bar" id="progressBar" style="width: 0%">
+                <div class="progress-text" id="progressText">0%</div>
+            </div>
+        </div>
+
+        <div class="progress-stats">
+            <div class="stat-item">
+                <div class="stat-value" id="emailsSent">0</div>
+                <div class="stat-label">Emails Sent</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="emailsRemaining">0</div>
+                <div class="stat-label">Remaining</div>
+            </div>
+        </div>
+
+        <div class="status-section" id="statusSection">
+            <div class="status-title" id="statusTitle">Status</div>
+            <div class="status-message" id="statusMessage">Loading job status...</div>
+        </div>
+
+        <div class="time-info" id="timeInfo"></div>
+
+        <div class="button-container">
+            <button class="refresh-btn" onclick="refreshProgress()">Refresh Now</button>
+            <button class="cancel-btn" onclick="cancelJob()" id="cancelBtn">Cancel Job</button>
+            <button class="close-btn" onclick="google.script.host.close()">Close Window</button>
+        </div>
+
+        <div class="auto-refresh">
+            Auto-refreshing every 5 seconds...
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+        let jobData = null;
+
+        function refreshProgress() {
+            google.script.run
+                .withSuccessHandler(updateProgress)
+                .withFailureHandler(handleError)
+                .getJobProgress();
+        }
+
+        function updateProgress(data) {
+            jobData = data;
+            
+            if (!data || !data.active) {
+                // No active job
+                document.getElementById('batchInfo').textContent = 'No active email job';
+                document.getElementById('progressBar').style.width = '0%';
+                document.getElementById('progressText').textContent = 'No Job';
+                document.getElementById('emailsSent').textContent = '0';
+                document.getElementById('emailsRemaining').textContent = '0';
+                
+                const statusSection = document.getElementById('statusSection');
+                statusSection.className = 'status-section';
+                document.getElementById('statusTitle').textContent = 'No Active Job';
+                document.getElementById('statusMessage').textContent = 'There is no email sending job currently running.';
+                document.getElementById('timeInfo').textContent = '';
+                document.getElementById('cancelBtn').disabled = true;
+                
+                // Stop auto-refresh
+                if (refreshInterval) {
+                    clearInterval(refreshInterval);
+                }
+                return;
+            }
+
+            // Update basic info
+            const serviceBadge = `<span class="service-badge ${data.emailService}">${data.emailService.toUpperCase()}</span>`;
+            document.getElementById('batchInfo').innerHTML = `Batch: ${data.batchId} ${serviceBadge}`;
+            
+            // Update progress bar
+            const percentage = Math.round((data.emailsSent / data.totalEmails) * 100);
+            document.getElementById('progressBar').style.width = percentage + '%';
+            document.getElementById('progressText').textContent = percentage + '%';
+            
+            // Update stats
+            document.getElementById('emailsSent').textContent = data.emailsSent;
+            document.getElementById('emailsRemaining').textContent = data.totalEmails - data.emailsSent;
+            
+            // Update status
+            const statusSection = document.getElementById('statusSection');
+            if (data.isPaused) {
+                statusSection.className = 'status-section paused';
+                document.getElementById('progressBar').className = 'progress-bar paused';
+                document.getElementById('statusTitle').textContent = 'Job Paused';
+                document.getElementById('statusMessage').textContent = data.pauseReason || 'Job is temporarily paused.';
+            } else if (data.isComplete) {
+                statusSection.className = 'status-section';
+                document.getElementById('statusTitle').textContent = 'Job Complete';
+                document.getElementById('statusMessage').textContent = `All ${data.totalEmails} emails have been sent successfully!`;
+                document.getElementById('cancelBtn').disabled = true;
+                
+                // Stop auto-refresh
+                if (refreshInterval) {
+                    clearInterval(refreshInterval);
+                }
+            } else {
+                statusSection.className = 'status-section';
+                document.getElementById('progressBar').className = 'progress-bar';
+                document.getElementById('statusTitle').textContent = 'Sending Emails';
+                document.getElementById('statusMessage').textContent = `Sending emails... ${data.emailService === 'mailersend' ? '(~8 emails/minute)' : '(up to 100/hour)'}`;
+            }
+            
+            // Update time info
+            const startTime = new Date(data.startTime);
+            const now = new Date();
+            const elapsed = Math.round((now - startTime) / 1000 / 60); // minutes
+            let timeText = `Started: ${startTime.toLocaleTimeString()}`;
+            if (elapsed > 0) {
+                timeText += ` (${elapsed} min ago)`;
+            }
+            if (data.nextResumeTime) {
+                const resumeTime = new Date(data.nextResumeTime);
+                timeText += ` • Resumes: ${resumeTime.toLocaleTimeString()}`;
+            }
+            document.getElementById('timeInfo').textContent = timeText;
+        }
+
+        function handleError(error) {
+            console.error('Error refreshing progress:', error);
+            const statusSection = document.getElementById('statusSection');
+            statusSection.className = 'status-section error';
+            document.getElementById('statusTitle').textContent = 'Error';
+            document.getElementById('statusMessage').textContent = 'Unable to refresh progress: ' + error.message;
+        }
+
+        function cancelJob() {
+            if (!jobData || !jobData.active) {
+                alert('No active job to cancel.');
+                return;
+            }
+
+            const confirmed = confirm(`Are you sure you want to cancel the email job for batch "${jobData.batchId}"?\n\nProgress: ${jobData.emailsSent} of ${jobData.totalEmails} emails sent.`);
+            
+            if (confirmed) {
+                google.script.run
+                    .withSuccessHandler(function() {
+                        alert('Job cancelled successfully.');
+                        refreshProgress();
+                    })
+                    .withFailureHandler(function(error) {
+                        alert('Error cancelling job: ' + error.message);
+                    })
+                    .cancelActiveJob();
+            }
+        }
+
+        // Initialize
+        refreshProgress();
+        
+        // Set up auto-refresh every 5 seconds
+        refreshInterval = setInterval(refreshProgress, 5000);
+        
+        // Clean up interval when window closes
+        window.addEventListener('beforeunload', function() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
