@@ -55,6 +55,7 @@ function onOpen() {
           .addItem('Check Email Quotas', 'testEmailQuotas')
           .addItem('🔍 Debug Job Status', 'debugJobStatus')
           .addItem('▶️ Manually Resume Job', 'manuallyResumeJob')
+          .addItem('🔄 Reset MailerSend Rate Limit', 'resetMailerSendRateLimit')
           .addSeparator()
           .addItem('Remove Duplicate Emails', 'removeDuplicateEmails')
           .addItem('🧹 Cleanup All Triggers', 'cleanupAllTriggers'))
@@ -1188,6 +1189,10 @@ function manuallyResumeJob() {
       jobState.triggerId = null;
       saveJobState(jobState);
 
+      // Clear MailerSend rate limiting state to allow immediate sending
+      const properties = PropertiesService.getScriptProperties();
+      properties.deleteProperty('MAILERSEND_LAST_REQUESTS');
+
       // Resume the job
       resumeEmailSending();
 
@@ -1200,6 +1205,27 @@ function manuallyResumeJob() {
     console.error('Error in manuallyResumeJob:', error);
     SpreadsheetApp.getUi().alert('Resume Error',
       `Error resuming job: ${error.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/**
+ * Reset MailerSend rate limiting state
+ * This can help if the rate limiting gets stuck
+ */
+function resetMailerSendRateLimit() {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    properties.deleteProperty('MAILERSEND_LAST_REQUESTS');
+
+    SpreadsheetApp.getUi().alert('Rate Limit Reset',
+      'MailerSend rate limiting state has been reset. You can now send emails immediately.',
+      SpreadsheetApp.getUi().ButtonSet.OK);
+
+  } catch (error) {
+    console.error('Error resetting rate limit:', error);
+    SpreadsheetApp.getUi().alert('Reset Error',
+      `Error resetting rate limit: ${error.message}`,
       SpreadsheetApp.getUi().ButtonSet.OK);
   }
 }
@@ -1231,6 +1257,38 @@ function listGmailDrafts() {
 // ============================================================================
 
 /**
+ * Records a MailerSend API request timestamp for rate limiting tracking
+ * This is a non-blocking version that just records the request
+ */
+function recordMailerSendRequest() {
+  const properties = PropertiesService.getScriptProperties();
+  const now = new Date().getTime();
+
+  // Get the last request timestamps (stored as JSON array)
+  const lastRequestsJson = properties.getProperty('MAILERSEND_LAST_REQUESTS');
+  let lastRequests = [];
+
+  if (lastRequestsJson) {
+    try {
+      lastRequests = JSON.parse(lastRequestsJson);
+    } catch (e) {
+      console.error('Error parsing MailerSend request history:', e);
+      lastRequests = [];
+    }
+  }
+
+  // Remove requests older than 1 minute
+  const oneMinuteAgo = now - 60000;
+  lastRequests = lastRequests.filter(timestamp => timestamp > oneMinuteAgo);
+
+  // Add current request timestamp
+  lastRequests.push(now);
+
+  // Save updated timestamps
+  properties.setProperty('MAILERSEND_LAST_REQUESTS', JSON.stringify(lastRequests));
+}
+
+/**
  * Manages MailerSend API rate limiting by tracking request timestamps
  * @return {boolean} True if we can make a request now, false if we need to wait
  */
@@ -1259,12 +1317,6 @@ function checkMailerSendRateLimit() {
   if (lastRequests.length >= MAILERSEND_REQUESTS_PER_MINUTE) {
     return false; // Rate limit exceeded
   }
-
-  // Add current request timestamp
-  lastRequests.push(now);
-
-  // Save updated timestamps
-  properties.setProperty('MAILERSEND_LAST_REQUESTS', JSON.stringify(lastRequests));
 
   return true; // OK to make request
 }
@@ -1316,10 +1368,9 @@ function waitForMailerSendRateLimit() {
  * @return {Object} Response object with success status and message ID
  */
 function sendEmailWithMailerSend(toEmail, toName, subject, textContent, htmlContent, config) {
-  // Check and wait for rate limit if necessary
-  if (!checkMailerSendRateLimit()) {
-    waitForMailerSendRateLimit();
-  }
+  // For MailerSend, we'll handle rate limiting with delays instead of blocking
+  // This prevents the job from getting stuck and needing manual resume
+  recordMailerSendRequest(); // Just record the request, don't block
   const url = 'https://api.mailersend.com/v1/email';
 
   const payload = {
@@ -1867,27 +1918,13 @@ function checkEmailQuotas(emailsSentThisSession, emailConfig = null) {
     emailConfig = getEmailServiceConfig();
   }
 
-  // MailerSend has API rate limits (requests per minute), but much higher email limits
+  // MailerSend has much higher email limits than Gmail
+  // We handle rate limiting with delays between requests instead of blocking the entire job
   if (emailConfig.service === 'mailersend') {
-    // Check if we can make API requests (rate limit check)
-    const canMakeRequest = checkMailerSendRateLimit();
-
-    if (!canMakeRequest) {
-      return {
-        canSend: false,
-        reason: 'mailersend_api_rate_limit',
-        maxEmails: 0,
-        dailyQuotaRemaining: 'unlimited'
-      };
-    }
-
-    // For MailerSend, we can continue sending as long as the rate limit check passes
-    // The rate limiting is handled by checkMailerSendRateLimit() which tracks requests per minute
-    // No need to limit based on emailsSentThisSession since MailerSend has much higher limits
     return {
       canSend: true,
       reason: 'mailersend_ready',
-      maxEmails: 1000, // Allow large batches since MailerSend handles the rate limiting
+      maxEmails: 1000, // Allow large batches since MailerSend handles the rate limiting with delays
       dailyQuotaRemaining: 'unlimited'
     };
   }
